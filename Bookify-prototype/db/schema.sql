@@ -9,7 +9,7 @@
 SET FOREIGN_KEY_CHECKS = 0;
 DROP TABLE IF EXISTS tickets, payments, booking_items, bookings,
   percent_discounts, amount_discounts, promotions,
-  admission_units, event_ticket_types, ticket_type_catalog,
+  admission_units, standing_zones, event_ticket_types, ticket_type_catalog,
   seated_events, non_seated_events, events, organizers, users;
 SET FOREIGN_KEY_CHECKS = 1;
 
@@ -77,6 +77,15 @@ CREATE TABLE non_seated_events (
   CONSTRAINT fk_non_seated_event FOREIGN KEY (event_id, event_kind) REFERENCES events (event_id, event_kind)
 );
 
+-- A seated event may optionally have one additional standing area.
+CREATE TABLE standing_zones (
+  standing_zone_id  INT AUTO_INCREMENT PRIMARY KEY,
+  event_id          INT NOT NULL,
+  zone_name         VARCHAR(100) NOT NULL,
+  CONSTRAINT fk_standing_zones_event FOREIGN KEY (event_id) REFERENCES events (event_id),
+  CONSTRAINT uq_standing_zone_event UNIQUE (event_id)
+);
+
 -- ───────────── ticket types and sellable places ─────────────
 
 CREATE TABLE ticket_type_catalog (
@@ -105,10 +114,13 @@ CREATE TABLE admission_units (
   event_ticket_type_id  INT NOT NULL,
   row_label             VARCHAR(5) NULL,
   seat_number           INT NULL,
+  standing_zone_id      INT NULL,
   unit_status           ENUM('Available','Locked','Sold') NOT NULL DEFAULT 'Available',  -- BR14
   CONSTRAINT fk_units_ett FOREIGN KEY (event_ticket_type_id) REFERENCES event_ticket_types (event_ticket_type_id),
-  -- a seat has both a row and a number, or neither
+  CONSTRAINT fk_units_standing_zone FOREIGN KEY (standing_zone_id) REFERENCES standing_zones (standing_zone_id),
+  -- A unit is either a numbered seat or a standing place, never both.
   CONSTRAINT ck_units_row_seat CHECK ((row_label IS NULL) = (seat_number IS NULL)),
+  CONSTRAINT ck_units_location CHECK (row_label IS NULL OR standing_zone_id IS NULL),
   CONSTRAINT ck_units_seat_positive CHECK (seat_number IS NULL OR seat_number > 0),
   INDEX ix_units_status (event_ticket_type_id, unit_status)
 );

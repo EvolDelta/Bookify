@@ -42,7 +42,8 @@ END$$
 
 -- BR16 and BR22, shared by the insert and update triggers below.
 CREATE PROCEDURE check_admission_unit(
-  IN p_unit_id INT, IN p_ett_id INT, IN p_row VARCHAR(5), IN p_seat INT, IN p_is_insert BOOLEAN)
+  IN p_unit_id INT, IN p_ett_id INT, IN p_row VARCHAR(5), IN p_seat INT,
+  IN p_zone_id INT, IN p_is_insert BOOLEAN)
 BEGIN
   DECLARE v_event_id INT;
   DECLARE v_kind VARCHAR(20);
@@ -52,12 +53,22 @@ BEGIN
   FROM event_ticket_types ett JOIN events e ON e.event_id = ett.event_id
   WHERE ett.event_ticket_type_id = p_ett_id;
 
-  -- BR16: seated units have a row and seat; standing units have neither
-  IF v_kind = 'Seated' AND p_row IS NULL THEN
-    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR16: a unit of a seated event needs row_label and seat_number';
+  -- BR16: a seated event unit is either a numbered seat or in its optional stand zone.
+  IF v_kind = 'Seated' AND p_row IS NULL AND p_zone_id IS NULL THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR16: a seated event unit needs a seat or standing zone';
   END IF;
   IF v_kind = 'Non_Seated' AND p_row IS NOT NULL THEN
     SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR16: a unit of a non-seated event has no row_label or seat_number';
+  END IF;
+  IF v_kind = 'Non_Seated' AND p_zone_id IS NOT NULL THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR16: non-seated units use their event zone';
+  END IF;
+  IF p_row IS NOT NULL AND p_zone_id IS NOT NULL THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR16: a unit cannot be both a seat and a standing place';
+  END IF;
+  IF p_zone_id IS NOT NULL AND NOT EXISTS (
+       SELECT 1 FROM standing_zones WHERE standing_zone_id = p_zone_id AND event_id = v_event_id) THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR16: standing zone must belong to the unit event';
   END IF;
 
   -- BR16: row + seat is unique within the whole event (across all ticket types)
@@ -80,7 +91,8 @@ END$$
 CREATE TRIGGER trg_units_bi BEFORE INSERT ON admission_units
 FOR EACH ROW
 BEGIN
-  CALL check_admission_unit(NULL, NEW.event_ticket_type_id, NEW.row_label, NEW.seat_number, TRUE);
+  CALL check_admission_unit(NULL, NEW.event_ticket_type_id, NEW.row_label, NEW.seat_number,
+                            NEW.standing_zone_id, TRUE);
 END$$
 
 CREATE TRIGGER trg_units_bu BEFORE UPDATE ON admission_units
@@ -88,8 +100,10 @@ FOR EACH ROW
 BEGIN
   -- status changes happen thousands of times; only re-check when the seat itself moves
   IF NOT (NEW.event_ticket_type_id <=> OLD.event_ticket_type_id)
-     OR NOT (NEW.row_label <=> OLD.row_label) OR NOT (NEW.seat_number <=> OLD.seat_number) THEN
-    CALL check_admission_unit(OLD.unit_id, NEW.event_ticket_type_id, NEW.row_label, NEW.seat_number, FALSE);
+     OR NOT (NEW.row_label <=> OLD.row_label) OR NOT (NEW.seat_number <=> OLD.seat_number)
+     OR NOT (NEW.standing_zone_id <=> OLD.standing_zone_id) THEN
+    CALL check_admission_unit(OLD.unit_id, NEW.event_ticket_type_id, NEW.row_label, NEW.seat_number,
+                              NEW.standing_zone_id, FALSE);
   END IF;
 END$$
 

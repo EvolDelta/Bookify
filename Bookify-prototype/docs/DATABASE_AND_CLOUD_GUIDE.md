@@ -27,7 +27,7 @@ What lives where:
 | `src/services/bookings.js` | Lock → pay → sell flow, run as transactions (BR9, BR17–BR19) |
 | `src/routes/*.js` | The HTTP API |
 | `scripts/db-setup.js` | Builds the database from the `db/` files |
-| `scripts/smoke-test.js` | 39 automatic checks of the API and the database rules |
+| `scripts/smoke-test.js` | Automatic checks of the API and the database rules |
 
 ---
 
@@ -51,7 +51,7 @@ Open `.env` and set `DB_PASSWORD` to your local MySQL root password. `.env` is i
 ```bash
 npm install
 npm run db:setup      # creates database "bookify": tables, triggers and sample data
-npm run test:api      # 39 checks; should end with "39 checks passed."
+npm run test:api      # should end with all checks passed
 npm run dev           # http://localhost:3000 serves the site, http://localhost:3000/api/... the API
 ```
 
@@ -79,13 +79,13 @@ curl -X POST http://localhost:3000/api/bookings/8/payments -H "content-type: app
 | Role | Method & path | What it does |
 |---|---|---|
 | Customer | `GET /api/events` | Events on sale with available / locked / sold counts |
-| Customer | `GET /api/events/:id` | One event, its ticket types and every seat's status |
+| Customer | `GET /api/events/:id` | One event, its ticket types, optional standing zone and every unit's status |
 | Customer | `POST /api/users` | Register (`full_name`, `email`, `phone_number`) |
 | Customer | `POST /api/bookings` | Lock seats for 5 minutes (`user_id`, `units`, optional `promo_code`) |
 | Customer | `POST /api/bookings/:id/payments` | Record a payment (`payment_method`, `amount`, optional `payment_status`) |
 | Customer | `POST /api/bookings/:id/cancel` | Cancel an unpaid booking (`user_id`) |
 | Customer | `GET /api/users/:id/bookings` | "My reservations" |
-| Organizer | `POST /api/events` | Create a Draft event with its seats (see the comment in `src/routes/events.js`) |
+| Organizer | `POST /api/events` | Create a Draft event with seats and optionally one standing zone (see `src/routes/events.js`) |
 | Organizer | `PATCH /api/events/:id/status` | `On_sale` / `Closed` / `Cancelled` |
 | Organizer | `GET/POST /api/promotions` | List or create Amount / Percent promotions |
 | Manager | `GET /api/reports/sales-last-30-days` | O1 |
@@ -98,6 +98,14 @@ curl -X POST http://localhost:3000/api/bookings/8/payments -H "content-type: app
 | Admin | `DELETE /api/events/:id` | Remove a cancelled event that has no bookings |
 
 Login is out of scope in your proposal, so the API trusts the `user_id` the client sends. A real system would get it from a login session instead.
+
+When creating a seated event, the organizer may omit a standing zone or add one by including a `standing_zone` name and `quantity` on a ticket type. The units are counted against the same `total_capacity` as seats. The prototype has no login or role middleware, so it cannot verify whether a request comes from the organizer, host, or an admin; a production deployment must authorize those roles before allowing event changes.
+
+Example ticket type that includes both seats and standing places at the same price:
+```json
+{ "type_name": "Normal", "price": 300, "rows": ["B"], "seats_per_row": 20, "standing_zone": "Lawn", "quantity": 80 }
+```
+Include it alongside the usual seated ticket types. A ticket type can describe seats, standing places, or both; seats and standing places in one ticket type share its price. All ticket types marked with `standing_zone` for one event must use the same zone name. Omitting the property keeps the event seated-only. `GET /api/events/:id` returns `standing_zone` as the configured name or `null`; each unit also reports its `standing_zone` (or `null` for a numbered seat).
 
 ---
 
@@ -119,7 +127,7 @@ A good rule of thumb: **put a rule as low as it can go.** If the database itself
 | BR13 | `trg_events_bi` | triggers.sql |
 | BR14 allowed values | `ENUM(...)` columns | schema.sql |
 | BR15 uniqueness | `UNIQUE` constraints | schema.sql |
-| BR16 | `CHECK` (row and seat both or neither) + `trg_units_bi/bu` | both |
+| BR16 | `CHECK` (seat/standing location shape) + `trg_units_bi/bu` (seated unit must be a seat or a matching optional standing zone) | both |
 | BR17 5-minute lock | `CHECK (lock_expires_at = created_at + INTERVAL 5 MINUTE)` | schema.sql |
 | BR18 expiry | `expireStaleBookings()` | bookings.js |
 | BR19 paid when payments cover total | `payBooking()` | bookings.js |

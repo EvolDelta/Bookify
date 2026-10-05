@@ -58,6 +58,7 @@ async function main() {
   await check('event detail has subtype fields, ticket types and units', async () => {
     const r = await call('GET', '/events/1');
     assert.equal(r.body.seat_map_name, 'Main Hall A–E');
+    assert.equal(r.body.standing_zone, null);
     assert.equal(r.body.ticket_types.length, 3);
     assert.equal(r.body.units.length, 50);
   });
@@ -161,18 +162,31 @@ async function main() {
     assert.match(r.body.error, /BR13/);
   });
   let newEvent;
-  await check('after verification it can create a Draft event with seats, then open it', async () => {
+  await check('organizer can create a seated event with an optional standing zone, then open it', async () => {
     await call('PATCH', '/organizers/3/verification', { verification_status: 'Verified' });
     const r = await call('POST', '/events', {
       organizer_id: 3, event_name: 'Acoustic Night', event_date: '2030-01-10 20:00', venue_name: 'Hall 2',
       event_kind: 'Seated', total_capacity: 30, seat_map_name: 'Hall 2',
       ticket_types: [{ type_name: 'VIP', price: 800, rows: ['A'], seats_per_row: 5 },
-                     { type_name: 'Normal', price: 300, rows: ['B', 'C'], seats_per_row: 10 }] });
+                     { type_name: 'Normal', price: 300, rows: ['B', 'C'], seats_per_row: 10,
+                       standing_zone: 'Lawn', quantity: 5 }] });
     assert.equal(r.status, 201, JSON.stringify(r.body));
-    assert.equal(r.body.units_created, 25);
+    assert.equal(r.body.units_created, 30);
     newEvent = r.body.event_id;
+    const details = await call('GET', `/events/${newEvent}`);
+    assert.equal(details.body.standing_zone, 'Lawn');
+    assert.equal(details.body.units.filter(u => u.standing_zone === 'Lawn').length, 5);
+    assert.equal(details.body.units.filter(u => u.standing_zone === 'Lawn' && u.row_label === null && u.seat_number === null).length, 5);
+    assert.equal(details.body.units.filter(u => u.standing_zone === null && u.row_label !== null).length, 25);
     const open = await call('PATCH', `/events/${newEvent}/status`, { event_status: 'On_sale' });
     assert.equal(open.status, 200);
+  });
+  await check('standing zones cannot be attached to units from another event', async () => {
+    const [[{ standing_zone_id: zoneId }]] = await pool.query(
+      'SELECT standing_zone_id FROM standing_zones WHERE event_id = ?', [newEvent]);
+    await rejects(
+      'INSERT INTO admission_units (event_ticket_type_id, standing_zone_id) VALUES (1, ?)',
+      [zoneId], /BR16: standing zone must belong to the unit event/);
   });
   await check('more units than total_capacity is refused (BR22)', async () => {
     const r = await call('POST', '/events', {

@@ -5,13 +5,20 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "db:setup": "node scripts/db-setup.js",
+    "db:schema": "node scripts/db-setup.js --no-seed",
+    "test:api": "node scripts/smoke-test.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "mysql2": "^3.24.5"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

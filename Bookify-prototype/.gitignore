@@ -25,3 +25,6 @@ desktop.ini
 dist/
 build/
 coverage/
+
+# Database CA certificates
+*.pem

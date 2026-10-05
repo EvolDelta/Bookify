@@ -78,6 +78,7 @@ const state = {
   code: '', appliedCode: null, codeMsg: '', codeOk: false,
   f: { name: '', email: '', card: '', exp: '', cvc: '' },
   a: { name: '', email: '' }, user: null,
+  l: { email: '', password: '' }, loginTouched: false,
   touched: false, authTouched: false, paying: false,
   orders: [], expired: [], lastOrder: null, mineTab: 'upcoming',
   n: { title: '', cat: 'Live music', venue: '', date: '', time: '20:30', about: '', price: '38', rows: '8', cols: '16', hold: 5 },
@@ -385,6 +386,7 @@ function viewModel() {
     vConfirm: S.role === 'attendee' && S.view === 'confirm',
     vMine: S.role === 'attendee' && S.view === 'mine',
     vAuth: S.role === 'attendee' && S.view === 'auth',
+    vLogin: S.role === 'attendee' && S.view === 'login',
     vODash: S.role === 'organizer' && S.oview === 'dash',
     vOCreate: S.role === 'organizer' && S.oview === 'create',
     vOOffer: S.role === 'organizer' && S.oview === 'offer',
@@ -396,6 +398,7 @@ function viewModel() {
       setState({ view: 'checkout', f: Object.assign({}, S.f, { name: S.f.name || (S.user ? S.user.name : ''), email: S.f.email || (S.user ? S.user.email : '') }) });
     },
     goMine: () => setState({ role: 'attendee', view: 'mine' }), goAuth: () => setState({ role: 'attendee', view: 'auth' }),
+    goLogin: () => setState({ role: 'attendee', view: 'login' }),
     oDash: () => setState({ role: 'organizer', oview: 'dash' }), oCreate: () => setState({ role: 'organizer', oview: 'create' }),
     oOffer: () => setState({ role: 'organizer', oview: 'offer' }), oStats: () => setState({ role: 'organizer', oview: 'stats' }),
     navDash: navBtn(S.oview === 'dash'), navCreate: navBtn(S.oview === 'create'), navOffer: navBtn(S.oview === 'offer'), navStats: navBtn(S.oview === 'stats'),
@@ -463,6 +466,10 @@ function viewModel() {
       nameBorder: bd(errs.name), emailBorder: bd(errs.email), cardBorder: bd(errs.card), expBorder: bd(errs.exp), cvcBorder: bd(errs.cvc),
       codeBorder: bd(S.codeMsg && !S.codeOk), authBorder: bd(S.authTouched && !EMAIL_RE.test(S.a.email)),
       auth: S.authTouched && !EMAIL_RE.test(S.a.email) ? 'Enter a valid email.' : '',
+      loginEmailBorder: bd(S.loginTouched && !EMAIL_RE.test(S.l.email)),
+      loginEmail: S.loginTouched && !EMAIL_RE.test(S.l.email) ? 'Enter a valid email.' : '',
+      loginPasswordBorder: bd(S.loginTouched && !S.l.password),
+      loginPassword: S.loginTouched && !S.l.password ? 'Enter your password.' : '',
       nTitleBorder: bd(nErr.nTitle), nVenueBorder: bd(nErr.nVenue), nDateBorder: bd(nErr.nDate), nPriceBorder: bd(nErr.nPrice),
       gCodeBorder: bd(gErr.gCode), gValueBorder: bd(gErr.gValue)
     }, errs, nErr, gErr),
@@ -504,6 +511,17 @@ function viewModel() {
       if (!EMAIL_RE.test(S.a.email)) return say('That email does not look right.');
       setState({ user: { name: S.a.name.trim() || 'Guest attendee', email: S.a.email.trim() }, view: 'browse', authTouched: false });
       say('Signed in — your details will prefill at checkout.');
+    },
+
+    // Prototype only: the password is not checked against anything yet.
+    l: S.l, setLoginEmail: set('l', 'email'), setLoginPassword: set('l', 'password'),
+    doLogIn: () => {
+      setState({ loginTouched: true });
+      if (!EMAIL_RE.test(S.l.email) || !S.l.password) return say('Check the highlighted fields.');
+      const email = S.l.email.trim();
+      const name = email.split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      setState({ user: { name, email }, view: 'browse', loginTouched: false, l: { email: '', password: '' } });
+      say('Logged in — welcome back, ' + name + '.');
     },
 
     orgName: 'Ribeira Collective',
@@ -612,7 +630,8 @@ function header(v) {
       <button data-click="${v.setOrganizer}" style="${v.segOrganizer}">Host</button>
     </div>
     ${v.signedIn ? html`<div style="display:flex;align-items:center;gap:7px"><div style="width:26px;height:26px;border-radius:50%;background:var(--color-accent-800);color:var(--color-accent-200);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500">${v.initials}</div><button data-click="${v.signOut}" class="btn btn-ghost" style="font-size:12px">Sign out</button></div>` : ''}
-    ${v.signedOut ? html`<button data-click="${v.goAuth}" class="btn btn-primary" style="font-size:13px">Sign in</button>` : ''}
+    ${v.signedOut ? html`<button data-click="${v.goAuth}" class="btn btn-primary" style="font-size:13px">Sign in</button>
+    <button data-click="${v.goLogin}" class="btn btn-secondary" style="font-size:13px">Log in</button>` : ''}
   </div>
 </div>
 ${v.holdActive ? html`
@@ -868,7 +887,22 @@ function authView(v) {
     <div class="field"><label>Name</label><input value="${v.a.name}" data-input="${v.setAuthName}" class="input" placeholder="Ana Ferreira"></div>
     <div class="field"><label>Email</label><input value="${v.a.email}" data-input="${v.setAuthEmail}" class="input" placeholder="you@example.com" style="border-color:${v.err.authBorder}">${fieldError(v.err.auth)}</div>
     <button data-click="${v.doSignIn}" class="btn btn-primary btn-block">Continue</button>
+    <button data-click="${v.goLogin}" class="btn btn-secondary btn-block">Log in</button>
     <button data-click="${v.goBrowse}" class="btn btn-ghost" style="font-size:12.5px">Keep browsing as a guest</button>
+  </div>
+</div>`;
+}
+
+function loginView(v) {
+  return html`
+<div class="pane" data-key="login" style="display:flex;justify-content:center;padding-top:var(--space-8)">
+  <div style="width:min(400px,100%);display:flex;flex-direction:column;gap:var(--space-4);padding:var(--space-8);border:1px solid var(--color-neutral-800);border-radius:var(--radius-lg);background:var(--color-surface);box-shadow:var(--shadow-md)">
+    <h1 style="font-size:24px;margin:0">Log in</h1>
+    <div style="font-size:12.5px;line-height:1.6;color:var(--color-neutral-400)">Welcome back. Log in to see your reservations and check out faster.</div>
+    <div class="field"><label>Email</label><input value="${v.l.email}" data-input="${v.setLoginEmail}" class="input" type="email" autocomplete="username" placeholder="you@example.com" style="border-color:${v.err.loginEmailBorder}">${fieldError(v.err.loginEmail)}</div>
+    <div class="field"><label>Password</label><input value="${v.l.password}" data-input="${v.setLoginPassword}" class="input" type="password" autocomplete="current-password" placeholder="Your password" style="border-color:${v.err.loginPasswordBorder}">${fieldError(v.err.loginPassword)}</div>
+    <button data-click="${v.doLogIn}" class="btn btn-primary btn-block">Log in</button>
+    <button data-click="${v.goAuth}" class="btn btn-ghost" style="font-size:12.5px">New here? Sign in instead</button>
   </div>
 </div>`;
 }
@@ -1032,6 +1066,7 @@ function page(v) {
     ${v.vConfirm ? confirmView(v) : ''}
     ${v.vMine ? mineView(v) : ''}
     ${v.vAuth ? authView(v) : ''}
+    ${v.vLogin ? loginView(v) : ''}
     ${v.vODash ? dashView(v) : ''}
     ${v.vOCreate ? createView(v) : ''}
     ${v.vOOffer ? offerView(v) : ''}

@@ -7,7 +7,7 @@
 -- WARNING: running this file DROPS every Bookify table first (clean rebuild).
 
 SET FOREIGN_KEY_CHECKS = 0;
-DROP TABLE IF EXISTS tickets, payments, booking_items, bookings,
+DROP TABLE IF EXISTS sessions, tickets, payments, booking_items, bookings,
   percent_discounts, amount_discounts, promotions,
   admission_units, event_ticket_types, ticket_type_catalog,
   seated_events, non_seated_events, events, organizers, users;
@@ -15,14 +15,29 @@ SET FOREIGN_KEY_CHECKS = 1;
 
 -- ───────────── people ─────────────
 
--- The ticket buyer. Login/password is out of scope, so there is no password column.
+-- A person with a login. Customers book tickets; Admins can also host events
+-- and run the admin/manager tasks. password_hash is a salted scrypt hash, never
+-- the password itself; NULL means the account cannot log in (e.g. sample data).
 CREATE TABLE users (
-  user_id       INT AUTO_INCREMENT PRIMARY KEY,
-  full_name     VARCHAR(100) NOT NULL,
-  email         VARCHAR(255) NOT NULL,
-  phone_number  VARCHAR(20),
-  created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  user_id        INT AUTO_INCREMENT PRIMARY KEY,
+  full_name      VARCHAR(100) NOT NULL,
+  email          VARCHAR(255) NOT NULL,
+  phone_number   VARCHAR(20),
+  password_hash  VARCHAR(255) NULL,
+  role           ENUM('Customer','Admin') NOT NULL DEFAULT 'Customer',
+  created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT uq_users_email UNIQUE (email)                                      -- BR15
+);
+
+-- One row per logged-in browser. The browser keeps a random token in a cookie;
+-- only its SHA-256 hash is stored, so a leaked table cannot be used to log in.
+CREATE TABLE sessions (
+  token_hash  CHAR(64) PRIMARY KEY,
+  user_id     INT NOT NULL,
+  created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  expires_at  DATETIME NOT NULL,
+  CONSTRAINT fk_sessions_user FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
+  INDEX ix_sessions_user (user_id)
 );
 
 CREATE TABLE organizers (

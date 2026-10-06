@@ -1,4 +1,4 @@
-/* Gather — event reservation prototype.
+/* Bookify — event reservation prototype.
  * Plain JavaScript: one state object, a render() that rebuilds the page from
  * template strings, and a small DOM patcher so focus, scroll and hover states
  * survive re-renders. No framework, no build step. */
@@ -77,7 +77,7 @@ const state = {
   eventId: 'e1', selected: [], holdStart: 0, holdEvent: null,
   code: '', appliedCode: null, codeMsg: '', codeOk: false,
   f: { name: '', email: '', card: '', exp: '', cvc: '' },
-  a: { name: '', email: '' }, user: null,
+  a: { name: '', email: '', password: '' }, user: null, authBusy: false,
   l: { email: '', password: '' }, loginTouched: false,
   touched: false, authTouched: false, paying: false,
   orders: [], expired: [], lastOrder: null, mineTab: 'upcoming',
@@ -116,6 +116,30 @@ function say(msg) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => setState({ toast: '' }), 2600);
 }
+
+// Calls the Express API. The login cookie is sent automatically (same site).
+async function api(method, path, body) {
+  let res;
+  try {
+    res = await fetch('/api' + path, {
+      method, credentials: 'same-origin',
+      headers: body ? { 'content-type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined
+    });
+  } catch {
+    throw new Error('Cannot reach the server. Is it running?');
+  }
+  const data = res.status === 204 ? null : await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = new Error(res.status >= 500 ? 'The server could not reach the database. Is MySQL running?' : (data && data.error) || 'Request failed.');
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
+const toUser = u => ({ id: u.user_id, name: u.full_name, email: u.email, role: u.role });
+const isAdmin = () => !!(state.user && state.user.role === 'Admin');
 
 const holdMs = () => CONFIG.holdMinutes * 60000;
 function holdLeft() {
@@ -229,7 +253,7 @@ function pay() {
   setTimeout(() => {
     const keys = state.selected.slice();
     const order = {
-      id: 'GTH-' + String(4000 + Math.floor(Math.random() * 5999)) + '-' + String(10 + Math.floor(Math.random() * 89)),
+      id: 'BKF-' + String(4000 + Math.floor(Math.random() * 5999)) + '-' + String(10 + Math.floor(Math.random() * 89)),
       eventId: ev.id, seatKeys: keys, seats: keys.map(k => seatLabel(ev, k)).join(', '),
       total: m.total, code: m.offer ? m.offer.code : '—', discount: m.disc,
       buyer: state.f.name.trim(), email: state.f.email.trim(), status: 'Paid'
@@ -316,7 +340,7 @@ function card(active) {
 /* ─────────────── view model: everything the markup reads ─────────────── */
 
 function viewModel() {
-  const S = state, ev = findEvent(S.holdEvent && (S.view === 'seats' || S.view === 'checkout') ? S.holdEvent : S.eventId);
+  const S = state, role = S.role === 'organizer' && isAdmin() ? 'organizer' : 'attendee', ev = findEvent(S.holdEvent && (S.view === 'seats' || S.view === 'checkout') ? S.holdEvent : S.eventId);
   const left = holdLeft();
   if (S.holdStart && left === 0) setTimeout(() => { if (holdLeft() === 0 && state.holdStart) expire(); }, 0);
   const m = money(ev);
@@ -363,14 +387,23 @@ function viewModel() {
 
   return {
     holdLabel: CONFIG.holdMinutes + ' minutes',
-    roleTag: S.role === 'organizer' ? 'Host' : 'Attend',
-    isAttendee: S.role === 'attendee', isOrganizer: S.role === 'organizer',
+    roleTag: role === 'organizer' ? 'Host' : 'Attend',
+    isAttendee: role === 'attendee', isOrganizer: role === 'organizer',
     setAttendee: () => setState({ role: 'attendee', view: S.view === 'browse' ? 'browse' : S.view }),
-    setOrganizer: () => setState({ role: 'organizer' }),
-    segAttendee: seg(S.role === 'attendee'), segOrganizer: seg(S.role === 'organizer'),
+    setOrganizer: () => {
+      if (!S.user) { setState({ role: 'attendee', view: 'login' }); return say('Log in with an admin account to host events.'); }
+      if (!isAdmin()) return say('Only admins can host events. Ask an admin to upgrade your account.');
+      setState({ role: 'organizer' });
+    },
+    segAttendee: seg(role === 'attendee'), segOrganizer: seg(role === 'organizer'),
     signedIn: !!S.user, signedOut: !S.user,
     initials: S.user ? S.user.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase() : '',
-    signOut: () => { setState({ user: null }); say('Signed out.'); },
+    isAdmin: isAdmin(),
+    signOut: async () => {
+      try { await api('POST', '/auth/logout'); } catch { /* signed out locally either way */ }
+      setState({ user: null, role: 'attendee', view: 'browse' });
+      say('Signed out.');
+    },
     toast: S.toast,
 
     query: S.query, setQuery: e => setState({ query: e.target.value }),
@@ -379,18 +412,18 @@ function viewModel() {
     clearFilters: () => setState({ query: '', cat: 'All' }),
     cats: cats.map(c => ({ label: c, style: chip(S.cat === c), onClick: () => setState({ cat: c }) })),
 
-    vBrowse: S.role === 'attendee' && S.view === 'browse',
-    vEvent: S.role === 'attendee' && S.view === 'event',
-    vSeats: S.role === 'attendee' && S.view === 'seats',
-    vCheckout: S.role === 'attendee' && S.view === 'checkout',
-    vConfirm: S.role === 'attendee' && S.view === 'confirm',
-    vMine: S.role === 'attendee' && S.view === 'mine',
-    vAuth: S.role === 'attendee' && S.view === 'auth',
-    vLogin: S.role === 'attendee' && S.view === 'login',
-    vODash: S.role === 'organizer' && S.oview === 'dash',
-    vOCreate: S.role === 'organizer' && S.oview === 'create',
-    vOOffer: S.role === 'organizer' && S.oview === 'offer',
-    vOStats: S.role === 'organizer' && S.oview === 'stats',
+    vBrowse: role === 'attendee' && S.view === 'browse',
+    vEvent: role === 'attendee' && S.view === 'event',
+    vSeats: role === 'attendee' && S.view === 'seats',
+    vCheckout: role === 'attendee' && S.view === 'checkout',
+    vConfirm: role === 'attendee' && S.view === 'confirm',
+    vMine: role === 'attendee' && S.view === 'mine',
+    vAuth: role === 'attendee' && S.view === 'auth',
+    vLogin: role === 'attendee' && S.view === 'login',
+    vODash: role === 'organizer' && S.oview === 'dash',
+    vOCreate: role === 'organizer' && S.oview === 'create',
+    vOOffer: role === 'organizer' && S.oview === 'offer',
+    vOStats: role === 'organizer' && S.oview === 'stats',
     goBrowse: () => setState({ role: 'attendee', view: 'browse' }),
     goEvent: () => go('event'), goSeats: () => go('seats'),
     goCheckout: () => {
@@ -466,6 +499,10 @@ function viewModel() {
       nameBorder: bd(errs.name), emailBorder: bd(errs.email), cardBorder: bd(errs.card), expBorder: bd(errs.exp), cvcBorder: bd(errs.cvc),
       codeBorder: bd(S.codeMsg && !S.codeOk), authBorder: bd(S.authTouched && !EMAIL_RE.test(S.a.email)),
       auth: S.authTouched && !EMAIL_RE.test(S.a.email) ? 'Enter a valid email.' : '',
+      authNameBorder: bd(S.authTouched && !S.a.name.trim()),
+      authName: S.authTouched && !S.a.name.trim() ? 'Enter your name.' : '',
+      authPasswordBorder: bd(S.authTouched && S.a.password.length < 8),
+      authPassword: S.authTouched && S.a.password.length < 8 ? 'At least 8 characters.' : '',
       loginEmailBorder: bd(S.loginTouched && !EMAIL_RE.test(S.l.email)),
       loginEmail: S.loginTouched && !EMAIL_RE.test(S.l.email) ? 'Enter a valid email.' : '',
       loginPasswordBorder: bd(S.loginTouched && !S.l.password),
@@ -505,23 +542,38 @@ function viewModel() {
     mineEmpty: (S.mineTab === 'upcoming' ? mineOrders.length : S.expired.length) === 0,
     hasOrders: mineOrders.length > 0, noOrders: mineOrders.length === 0, orderCount: mineOrders.length,
 
-    a: S.a, setAuthName: set('a', 'name'), setAuthEmail: set('a', 'email'),
-    doSignIn: () => {
+    a: S.a, setAuthName: set('a', 'name'), setAuthEmail: set('a', 'email'), setAuthPassword: set('a', 'password'),
+    authBusy: S.authBusy,
+    doSignIn: async () => {
       setState({ authTouched: true });
-      if (!EMAIL_RE.test(S.a.email)) return say('That email does not look right.');
-      setState({ user: { name: S.a.name.trim() || 'Guest attendee', email: S.a.email.trim() }, view: 'browse', authTouched: false });
-      say('Signed in — your details will prefill at checkout.');
+      if (!S.a.name.trim() || !EMAIL_RE.test(S.a.email) || S.a.password.length < 8) return say('Check the highlighted fields.');
+      setState({ authBusy: true });
+      try {
+        const u = await api('POST', '/auth/register', { full_name: S.a.name.trim(), email: S.a.email.trim(), password: S.a.password });
+        setState({ user: toUser(u), view: 'browse', authTouched: false, a: { name: '', email: '', password: '' } });
+        say('Account created — welcome, ' + u.full_name + '.');
+      } catch (err) {
+        say(err.message);
+      } finally {
+        setState({ authBusy: false });
+      }
     },
 
-    // Prototype only: the password is not checked against anything yet.
     l: S.l, setLoginEmail: set('l', 'email'), setLoginPassword: set('l', 'password'),
-    doLogIn: () => {
+    doLogIn: async () => {
       setState({ loginTouched: true });
       if (!EMAIL_RE.test(S.l.email) || !S.l.password) return say('Check the highlighted fields.');
-      const email = S.l.email.trim();
-      const name = email.split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-      setState({ user: { name, email }, view: 'browse', loginTouched: false, l: { email: '', password: '' } });
-      say('Logged in — welcome back, ' + name + '.');
+      setState({ authBusy: true });
+      try {
+        const u = await api('POST', '/auth/login', { email: S.l.email.trim(), password: S.l.password });
+        setState({ user: toUser(u), view: 'browse', loginTouched: false, l: { email: '', password: '' } });
+        say('Logged in — welcome back, ' + u.full_name + (u.role === 'Admin' ? ' (admin).' : '.'));
+      } catch (err) {
+        setState({ l: Object.assign({}, state.l, { password: '' }) });
+        say(err.message);
+      } finally {
+        setState({ authBusy: false });
+      }
     },
 
     orgName: 'Ribeira Collective',
@@ -607,10 +659,12 @@ function viewModel() {
 const fieldError = msg => msg ? html`<div style="font-size:11.5px;color:var(--color-accent-300);margin-top:4px">${msg}</div>` : '';
 const MONO = 'font-family:ui-monospace,Menlo,monospace';
 
+const LOGO = html`<svg width="22" height="22" viewBox="0 0 32 32" aria-hidden="true" style="flex:none"><path d="M5 7h22a2 2 0 0 1 2 2v4a3 3 0 0 0 0 6v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4a3 3 0 0 0 0-6V9a2 2 0 0 1 2-2z" fill="var(--color-accent)"/><path d="M12.5 11h4.2c2 0 3.3 1 3.3 2.6 0 1-.6 1.8-1.5 2.1 1.2.3 2 1.2 2 2.5 0 1.8-1.4 2.8-3.6 2.8h-4.4zm2.3 1.9v2.4h1.7c.9 0 1.4-.4 1.4-1.2s-.5-1.2-1.4-1.2zm0 4.2v2.6h2c1 0 1.6-.5 1.6-1.3s-.6-1.3-1.6-1.3z" fill="var(--color-bg)"/></svg>`;
+
 function header(v) {
   return html`
 <div data-key="nav" style="position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:var(--space-6);padding:var(--space-4) var(--space-8);background:color-mix(in srgb, var(--color-bg) 88%, transparent);backdrop-filter:blur(10px);border-bottom:1px solid var(--color-divider)">
-  <button data-click="${v.goBrowse}" style="display:flex;align-items:baseline;gap:6px;border:0;background:none;cursor:pointer;padding:0;font-family:var(--font-heading);font-weight:500;font-size:17px;letter-spacing:-.02em;color:var(--color-text)">Gather<span style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--color-accent)">${v.roleTag}</span></button>
+  <button data-click="${v.goBrowse}" aria-label="Bookify home" style="display:flex;align-items:center;gap:7px;border:0;background:none;cursor:pointer;padding:0;font-family:var(--font-heading);font-weight:500;font-size:17px;letter-spacing:-.02em;color:var(--color-text)">${LOGO}Bookify<span style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--color-accent)">${v.roleTag}</span></button>
   ${v.isAttendee ? html`
   <div style="flex:1;display:flex;align-items:center;gap:var(--space-4);min-width:0">
     <input value="${v.query}" data-input="${v.setQuery}" placeholder="Search events, venues, cities" class="input" style="flex:1;min-width:0;max-width:420px;font-size:13px">
@@ -629,8 +683,8 @@ function header(v) {
       <button data-click="${v.setAttendee}" style="${v.segAttendee}">Attend</button>
       <button data-click="${v.setOrganizer}" style="${v.segOrganizer}">Host</button>
     </div>
-    ${v.signedIn ? html`<div style="display:flex;align-items:center;gap:7px"><div style="width:26px;height:26px;border-radius:50%;background:var(--color-accent-800);color:var(--color-accent-200);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500">${v.initials}</div><button data-click="${v.signOut}" class="btn btn-ghost" style="font-size:12px">Sign out</button></div>` : ''}
-    ${v.signedOut ? html`<button data-click="${v.goAuth}" class="btn btn-primary" style="font-size:13px">Sign in</button>
+    ${v.signedIn ? html`<div style="display:flex;align-items:center;gap:7px"><div style="width:26px;height:26px;border-radius:50%;background:var(--color-accent-800);color:var(--color-accent-200);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500">${v.initials}</div>${v.isAdmin ? html`<span class="tag tag-accent" style="font-size:10px">Admin</span>` : ''}<button data-click="${v.signOut}" class="btn btn-ghost" style="font-size:12px">Sign out</button></div>` : ''}
+    ${v.signedOut ? html`<button data-click="${v.goAuth}" class="btn btn-primary" style="font-size:13px">Sign up</button>
     <button data-click="${v.goLogin}" class="btn btn-secondary" style="font-size:13px">Log in</button>` : ''}
   </div>
 </div>
@@ -882,12 +936,13 @@ function authView(v) {
   return html`
 <div class="pane" data-key="auth" style="display:flex;justify-content:center;padding-top:var(--space-8)">
   <div style="width:min(400px,100%);display:flex;flex-direction:column;gap:var(--space-4);padding:var(--space-8);border:1px solid var(--color-neutral-800);border-radius:var(--radius-lg);background:var(--color-surface);box-shadow:var(--shadow-md)">
-    <h1 style="font-size:24px;margin:0">Sign in to reserve</h1>
-    <div style="font-size:12.5px;line-height:1.6;color:var(--color-neutral-400)">Signing in first means the ${v.holdLabel} hold is never spent on account setup.</div>
-    <div class="field"><label>Name</label><input value="${v.a.name}" data-input="${v.setAuthName}" class="input" placeholder="Ana Ferreira"></div>
-    <div class="field"><label>Email</label><input value="${v.a.email}" data-input="${v.setAuthEmail}" class="input" placeholder="you@example.com" style="border-color:${v.err.authBorder}">${fieldError(v.err.auth)}</div>
-    <button data-click="${v.doSignIn}" class="btn btn-primary btn-block">Continue</button>
-    <button data-click="${v.goLogin}" class="btn btn-secondary btn-block">Log in</button>
+    <h1 style="font-size:24px;margin:0">Create your account</h1>
+    <div style="font-size:12.5px;line-height:1.6;color:var(--color-neutral-400)">Signing up first means the ${v.holdLabel} hold is never spent on account setup.</div>
+    <div class="field"><label>Name</label><input value="${v.a.name}" data-input="${v.setAuthName}" class="input" autocomplete="name" placeholder="Somchai Jaidee" style="border-color:${v.err.authNameBorder}">${fieldError(v.err.authName)}</div>
+    <div class="field"><label>Email</label><input value="${v.a.email}" data-input="${v.setAuthEmail}" class="input" type="email" autocomplete="email" placeholder="you@example.com" style="border-color:${v.err.authBorder}">${fieldError(v.err.auth)}</div>
+    <div class="field"><label>Password</label><input value="${v.a.password}" data-input="${v.setAuthPassword}" class="input" type="password" autocomplete="new-password" placeholder="At least 8 characters" style="border-color:${v.err.authPasswordBorder}">${fieldError(v.err.authPassword)}</div>
+    <button data-click="${v.doSignIn}" class="btn btn-primary btn-block" ${v.authBusy ? 'disabled' : ''}>${v.authBusy ? 'Creating account…' : 'Continue'}</button>
+    <button data-click="${v.goLogin}" class="btn btn-secondary btn-block">Already have an account? Log in</button>
     <button data-click="${v.goBrowse}" class="btn btn-ghost" style="font-size:12.5px">Keep browsing as a guest</button>
   </div>
 </div>`;
@@ -901,8 +956,8 @@ function loginView(v) {
     <div style="font-size:12.5px;line-height:1.6;color:var(--color-neutral-400)">Welcome back. Log in to see your reservations and check out faster.</div>
     <div class="field"><label>Email</label><input value="${v.l.email}" data-input="${v.setLoginEmail}" class="input" type="email" autocomplete="username" placeholder="you@example.com" style="border-color:${v.err.loginEmailBorder}">${fieldError(v.err.loginEmail)}</div>
     <div class="field"><label>Password</label><input value="${v.l.password}" data-input="${v.setLoginPassword}" class="input" type="password" autocomplete="current-password" placeholder="Your password" style="border-color:${v.err.loginPasswordBorder}">${fieldError(v.err.loginPassword)}</div>
-    <button data-click="${v.doLogIn}" class="btn btn-primary btn-block">Log in</button>
-    <button data-click="${v.goAuth}" class="btn btn-ghost" style="font-size:12.5px">New here? Sign in instead</button>
+    <button data-click="${v.doLogIn}" class="btn btn-primary btn-block" ${v.authBusy ? 'disabled' : ''}>${v.authBusy ? 'Logging in…' : 'Log in'}</button>
+    <button data-click="${v.goAuth}" class="btn btn-ghost" style="font-size:12.5px">New here? Create an account</button>
   </div>
 </div>`;
 }
@@ -1108,3 +1163,4 @@ setInterval(() => {
 }, 6000);
 
 render();
+api('GET', '/auth/me').then(u => { if (u) setState({ user: toUser(u) }); }).catch(() => { /* server unreachable: stay logged out */ });

@@ -27,7 +27,9 @@ What lives where:
 | `src/services/bookings.js` | Lock → pay → sell flow, run as transactions (BR9, BR17–BR19) |
 | `src/routes/*.js` | The HTTP API |
 | `scripts/db-setup.js` | Builds the database from the `db/` files |
-| `scripts/smoke-test.js` | 39 automatic checks of the API and the database rules |
+| `src/auth.js`, `src/routes/auth.js` | Sign up, log in, sessions, and the "admins only" checks |
+| `scripts/make-admin.js` | Turns a registered account into an Admin |
+| `scripts/smoke-test.js` | 49 automatic checks of the API, the login rules and the database rules |
 
 ---
 
@@ -51,7 +53,7 @@ Open `.env` and set `DB_PASSWORD` to your local MySQL root password. `.env` is i
 ```bash
 npm install
 npm run db:setup      # creates database "bookify": tables, triggers and sample data
-npm run test:api      # 39 checks; should end with "39 checks passed."
+npm run test:api      # 49 checks; should end with "49 checks passed."
 npm run dev           # http://localhost:3000 serves the site, http://localhost:3000/api/... the API
 ```
 
@@ -63,41 +65,59 @@ npm run dev           # http://localhost:3000 serves the site, http://localhost:
 2. Open `db/queries.sql` and run the queries one at a time (Ctrl+Enter on a query). Screenshots of these results are your M5 deliverable.
 3. Go to **Database → Reverse Engineer…** and pick `bookify`. Workbench draws the diagram from the real tables. Compare it with your Draw.io ERD: every entity should be there, with the same keys. This is the "free check on our diagram" your tech-stack table mentions.
 
-### 5. Try the API
+### 5. Create your admin account
+
+Everyone who signs up on the website is a **Customer**: they can browse and book, but they can't open the **Host** side. To make an admin:
+
+1. Run `npm run dev`, open http://localhost:3000, click **Sign up**, and create your account with your own password.
+2. In the terminal, promote that account:
+   ```bash
+   npm run make-admin -- your-email@example.com
+   ```
+3. Reload the page. You'll see an **Admin** badge next to your initials, and **Host** now opens.
+
+To turn an admin back into a customer, run `npm run make-admin -- your-email@example.com --remove`. The admin's password never goes into a script or SQL file: they type it on the website, and only a hash is stored.
+
+### 6. Try the API
+
+Bookings need a logged-in user. With `curl`, `-c`/`-b cookies.txt` saves and sends the login cookie, like a browser does:
 
 ```bash
 curl http://localhost:3000/api/events
-curl http://localhost:3000/api/events/1
-curl -X POST http://localhost:3000/api/bookings -H "content-type: application/json" -d "{\"user_id\":2,\"units\":[{\"unit_id\":12}],\"promo_code\":\"EARLYBIRD\"}"
-curl -X POST http://localhost:3000/api/bookings/8/payments -H "content-type: application/json" -d "{\"payment_method\":\"PromptPay\",\"amount\":400}"
+curl -c cookies.txt -X POST http://localhost:3000/api/auth/register -H "content-type: application/json" -d "{\"full_name\":\"Test User\",\"email\":\"test@example.com\",\"password\":\"test-password-1\"}"
+curl -b cookies.txt -X POST http://localhost:3000/api/bookings -H "content-type: application/json" -d "{\"units\":[{\"unit_id\":12}],\"promo_code\":\"EARLYBIRD\"}"
+curl -b cookies.txt -X POST http://localhost:3000/api/bookings/8/payments -H "content-type: application/json" -d "{\"payment_method\":\"PromptPay\",\"amount\":400}"
 ```
 
-(Use whatever `booking_id` the third command returns.) Run the booking command twice and the second one fails with *"Already taken: B2"*.
+(Use whatever `booking_id` the booking command returns.) Run the booking command twice and the second one fails with *"Already taken: B2"*. Without `-b cookies.txt` you get *"Please log in first."*
 
 #### API reference
 
-| Role | Method & path | What it does |
+| Who | Method & path | What it does |
 |---|---|---|
-| Customer | `GET /api/events` | Events on sale with available / locked / sold counts |
-| Customer | `GET /api/events/:id` | One event, its ticket types and every seat's status |
-| Customer | `POST /api/users` | Register (`full_name`, `email`, `phone_number`) |
-| Customer | `POST /api/bookings` | Lock seats for 5 minutes (`user_id`, `units`, optional `promo_code`) |
-| Customer | `POST /api/bookings/:id/payments` | Record a payment (`payment_method`, `amount`, optional `payment_status`) |
-| Customer | `POST /api/bookings/:id/cancel` | Cancel an unpaid booking (`user_id`) |
-| Customer | `GET /api/users/:id/bookings` | "My reservations" |
-| Organizer | `POST /api/events` | Create a Draft event with its seats (see the comment in `src/routes/events.js`) |
-| Organizer | `PATCH /api/events/:id/status` | `On_sale` / `Closed` / `Cancelled` |
-| Organizer | `GET/POST /api/promotions` | List or create Amount / Percent promotions |
-| Manager | `GET /api/reports/sales-last-30-days` | O1 |
-| Manager | `GET /api/reports/seat-status` | O2: which events are full |
-| Manager | `GET /api/reports/promotion-usage` | O4 |
-| Manager | `GET /api/reports/pending-bookings` | Unpaid holds and their remaining time |
-| Manager | `GET /api/reports/events/:id/revenue` | Takings split by payment method |
-| Admin | `POST /api/organizers`, `PATCH /api/organizers/:id/verification` | Register and verify organizers (BR13) |
-| Admin | `PATCH /api/users/:id` | Correct a user's details |
-| Admin | `DELETE /api/events/:id` | Remove a cancelled event that has no bookings |
+| Anyone | `POST /api/auth/register` | Create a Customer account and log in (`full_name`, `email`, `password` with at least 8 characters) |
+| Anyone | `POST /api/auth/login` · `POST /api/auth/logout` | Log in or out (sets or clears the `bookify_session` cookie) |
+| Anyone | `GET /api/auth/me` | The logged-in user, or `null` |
+| Anyone | `GET /api/events` · `GET /api/events/:id` | Events on sale, and one event with every seat's status |
+| Anyone | `GET /api/promotions` | Promotion codes |
+| Logged in | `POST /api/bookings` | Lock seats for 5 minutes (`units`, optional `promo_code`) |
+| Logged in | `POST /api/bookings/:id/payments` | Pay your booking (`payment_method`, `amount`, optional `payment_status`) |
+| Logged in | `POST /api/bookings/:id/cancel` | Cancel your unpaid booking |
+| Logged in | `GET /api/bookings/:id` · `GET /api/users/:id/bookings` | Your own booking or reservations (admins can see anyone's) |
+| Admin | `POST /api/events` | Host a Draft event with its seats (see the comment in `src/routes/events.js`) |
+| Admin | `PATCH /api/events/:id/status` · `DELETE /api/events/:id` | Open, close or cancel an event; remove a cancelled event that has no bookings |
+| Admin | `POST /api/promotions` | Create Amount / Percent promotions |
+| Admin | `GET /api/reports/...` | `sales-last-30-days` (O1), `seat-status` (O2), `promotion-usage` (O4), `pending-bookings`, `events/:id/revenue` |
+| Admin | `/api/organizers...` | List, register and verify organizers (BR13) |
+| Admin | `POST /api/users` · `PATCH /api/users/:id` | Add a user, or correct a user's details |
 
-Login is out of scope in your proposal, so the API trusts the `user_id` the client sends. A real system would get it from a login session instead.
+A guest who calls a login-only route gets **401 Please log in first**. A customer who calls an admin route gets **403 Only admins can do this**. The website hides nothing important: the real check happens in the API (`requireAdmin` in `src/auth.js`), so even a hand-made request can't get past it.
+
+#### How the login works
+
+- **Passwords** are stored as a salted **scrypt** hash in `users.password_hash`, like `scrypt$16384$8$1$<salt>$<hash>`. The same password gives a different hash for every user, and the hash can't be turned back into the password.
+- **Sessions:** after login, the browser gets a random token in an **HttpOnly** cookie, which page JavaScript can't read. The `sessions` table stores only the SHA-256 hash of that token, and a session lasts 7 days.
+- A wrong password and an unknown email get the same message, *"Wrong email or password."*, so nobody can find out which emails have accounts.
 
 ---
 
@@ -230,5 +250,5 @@ Create a **Web Service** from the repo, with build command `npm install` and sta
 
 ## What isn't done yet
 
-- **The frontend isn't connected to the API.** `public/app.js` still uses its own in-memory demo data, with euros, a 6-seat limit, card payment and "Gather" branding. Connecting it means replacing those arrays with `fetch('/api/…')` calls.
-- **Login.** Out of scope, per the proposal.
+- **Only login is connected to the API.** Sign up, Log in, Sign out and the Host lock use the real accounts. Events, seats, bookings and the Host dashboard in `public/app.js` are still in-memory demo data (with euros, a 6-seat limit and card payment). Connecting them means replacing those arrays with `fetch('/api/…')` calls.
+- **Proposal update:** login is now built, so move "User login security" from out of scope to in scope, and add `password_hash` and `role` to Users plus the `sessions` table to your entity list and ERD.

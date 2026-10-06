@@ -3,6 +3,7 @@ const express = require('express');
 const v = require('../validate');
 const { HttpError } = require('../errors');
 const { pool, transaction } = require('../db');
+const { requireAdmin } = require('../auth');
 
 const router = express.Router();
 
@@ -24,7 +25,7 @@ router.get('/', async (req, res) => {
 // POST /api/promotions
 // Amount:  { "coupon_code": "EARLYBIRD", "discount_type": "Amount",  "discount_amount": 100,  "start_date": "...", "end_date": "..." }
 // Percent: { "coupon_code": "SE20",      "discount_type": "Percent", "discount_percent": 20, "max_discount_cap": 300, ... }
-router.post('/', async (req, res) => {
+router.post('/', requireAdmin, async (req, res) => {
   const b = req.body;
   const code = v.text(b.coupon_code, 'coupon_code', { max: 30 }).toUpperCase();
   if (!/^[A-Z0-9]+$/.test(code)) throw new HttpError(400, 'coupon_code may only contain letters and digits.');

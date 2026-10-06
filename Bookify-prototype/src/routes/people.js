@@ -1,16 +1,17 @@
-// Users (customers) and organizers. Login is out of scope, so a user is
-// identified by the user_id the client sends.
+// Users and organizers. People create their own account with
+// POST /api/auth/register; the routes here are for admins and for "my account".
 const express = require('express');
 const v = require('../validate');
 const { HttpError } = require('../errors');
 const { pool } = require('../db');
 const { expireStaleBookings } = require('../services/bookings');
+const { requireAdmin, assertSelfOrAdmin } = require('../auth');
 
 const users = express.Router();
 const organizers = express.Router();
 
-// POST /api/users  { "full_name", "email", "phone_number" }
-users.post('/', async (req, res) => {
+// POST /api/users  { "full_name", "email", "phone_number" } — admin adds a user without a login
+users.post('/', requireAdmin, async (req, res) => {
   const u = {
     full_name: v.text(req.body.full_name, 'full_name', { max: 100 }),
     email: v.email(req.body.email, 'email'),
@@ -20,15 +21,17 @@ users.post('/', async (req, res) => {
   res.status(201).json({ user_id: r.insertId, ...u });
 });
 
-// GET /api/users/:id
+// GET /api/users/:id — yourself, or anyone if you are an admin
 users.get('/:id', async (req, res) => {
-  const [[u]] = await pool.query('SELECT * FROM users WHERE user_id = ?', [v.id(req.params.id, 'id')]);
+  const id = v.id(req.params.id, 'id');
+  assertSelfOrAdmin(req, id);
+  const [[u]] = await pool.query('SELECT user_id, full_name, email, phone_number, role, created_at FROM users WHERE user_id = ?', [id]);
   if (!u) throw new HttpError(404, 'User not found.');
   res.json(u);
 });
 
 // PATCH /api/users/:id — administrator corrects a user's details
-users.patch('/:id', async (req, res) => {
+users.patch('/:id', requireAdmin, async (req, res) => {
   const id = v.id(req.params.id, 'id');
   const changes = {};
   if (req.body.full_name !== undefined) changes.full_name = v.text(req.body.full_name, 'full_name', { max: 100 });
@@ -42,6 +45,7 @@ users.patch('/:id', async (req, res) => {
 
 // GET /api/users/:id/bookings — "my reservations"
 users.get('/:id/bookings', async (req, res) => {
+  assertSelfOrAdmin(req, v.id(req.params.id, 'id'));
   await expireStaleBookings();
   const [rows] = await pool.query(
     `SELECT b.booking_id, b.booking_status, b.created_at, b.lock_expires_at, b.total_amount,

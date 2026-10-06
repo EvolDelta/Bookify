@@ -4,6 +4,7 @@ const v = require('../validate');
 const { HttpError } = require('../errors');
 const { pool, transaction } = require('../db');
 const { expireStaleBookings } = require('../services/bookings');
+const { requireAdmin } = require('../auth');
 
 const router = express.Router();
 
@@ -25,6 +26,7 @@ const AVAILABILITY_GROUP = ` GROUP BY e.event_id, o.organizer_name`;
 router.get('/', async (req, res) => {
   await expireStaleBookings();
   const status = v.oneOf(req.query.status, 'status', ['Draft', 'On_sale', 'Closed', 'Cancelled', 'all'], 'On_sale');
+  if (status !== 'On_sale' && (!req.user || req.user.role !== 'Admin')) throw new HttpError(403, 'Only admins can list events that are not on sale.');
   const where = status === 'all' ? '' : ' WHERE e.event_status = ?';
   const [rows] = await pool.query(AVAILABILITY + where + AVAILABILITY_GROUP + ' ORDER BY e.event_date', [status]);
   res.json(rows.map(r => ({ ...r, is_full: r.units > 0 && r.sold === r.units })));
@@ -61,12 +63,12 @@ router.get('/:id', async (req, res) => {
   res.json({ ...event, ...sub, ticket_types: ticketTypes, units });
 });
 
-// POST /api/events — an organizer creates a Draft event with its seats.
+// POST /api/events — an admin hosts a new Draft event (with its seats) for an organizer.
 // Seated:     { ..., "event_kind": "Seated", "seat_map_name": "Hall", "ticket_types": [
 //               { "type_name": "VIP", "price": 1200, "rows": ["A"], "seats_per_row": 10 }, ... ] }
 // Non_Seated: { ..., "event_kind": "Non_Seated", "zone_name": "Field", "ticket_types": [
 //               { "type_name": "Normal", "price": 150, "quantity": 80 }, ... ] }
-router.post('/', async (req, res) => {
+router.post('/', requireAdmin, async (req, res) => {
   const b = req.body;
   const e = {
     organizer_id: v.id(b.organizer_id, 'organizer_id'),
@@ -126,7 +128,7 @@ router.post('/', async (req, res) => {
 
 // PATCH /api/events/:id/status  { "event_status": "On_sale" | "Closed" | "Cancelled" }
 // Opening for sale runs the BR10/BR11 checks in trg_events_bu.
-router.patch('/:id/status', async (req, res) => {
+router.patch('/:id/status', requireAdmin, async (req, res) => {
   const id = v.id(req.params.id, 'id');
   const status = v.oneOf(req.body.event_status, 'event_status', ['Draft', 'On_sale', 'Closed', 'Cancelled']);
   const [r] = await pool.query('UPDATE events SET event_status = ? WHERE event_id = ?', [status, id]);
@@ -136,7 +138,7 @@ router.patch('/:id/status', async (req, res) => {
 
 // DELETE /api/events/:id — administrator removes a cancelled event that nobody booked.
 // Events with bookings are kept so sales history still adds up.
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requireAdmin, async (req, res) => {
   const id = v.id(req.params.id, 'id');
   await transaction(async conn => {
     const [[ev]] = await conn.query('SELECT event_status FROM events WHERE event_id = ? FOR UPDATE', [id]);

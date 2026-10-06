@@ -18,8 +18,9 @@ SET FOREIGN_KEY_CHECKS = 1;
 
 -- ───────────── people ─────────────
 
--- A person with a login. Customers book tickets; Admins can also host events
--- and run the admin/manager tasks. password_hash is a salted scrypt hash, never
+-- A person with a login. Customers book tickets; Organizers also host the
+-- events of the organizer they run (organizers.user_id); Admins can host for
+-- any organizer and run the admin/manager tasks. password_hash is a salted scrypt hash, never
 -- the password itself; NULL means the account cannot log in (e.g. sample data).
 CREATE TABLE users (
   user_id        INT AUTO_INCREMENT PRIMARY KEY,
@@ -27,7 +28,7 @@ CREATE TABLE users (
   email          VARCHAR(255) NOT NULL,
   phone_number   VARCHAR(20),
   password_hash  VARCHAR(255) NULL,
-  role           ENUM('Customer','Admin') NOT NULL DEFAULT 'Customer',
+  role           ENUM('Customer','Organizer','Admin') NOT NULL DEFAULT 'Customer',
   created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT uq_users_email UNIQUE (email)                                      -- BR15
 );
@@ -43,13 +44,19 @@ CREATE TABLE sessions (
   INDEX ix_sessions_user (user_id)
 );
 
+-- user_id is the account that runs this organizer (role Organizer); NULL
+-- means nobody logs in for it and only an admin can host its events.
 CREATE TABLE organizers (
   organizer_id         INT AUTO_INCREMENT PRIMARY KEY,
   organizer_name       VARCHAR(100) NOT NULL,
   contact_email        VARCHAR(255) NOT NULL,
   verification_status  ENUM('Pending','Verified','Rejected') NOT NULL DEFAULT 'Pending',
   verified_at          DATETIME NULL,
+  user_id              INT NULL,
   CONSTRAINT uq_organizers_email UNIQUE (contact_email),
+  -- one account runs at most one organizer
+  CONSTRAINT uq_organizers_user UNIQUE (user_id),
+  CONSTRAINT fk_organizers_user FOREIGN KEY (user_id) REFERENCES users (user_id),
   -- a verified organizer must say when it was verified
   CONSTRAINT ck_organizers_verified CHECK (verification_status <> 'Verified' OR verified_at IS NOT NULL)
 );

@@ -7,6 +7,7 @@
 const assert = require('assert/strict');
 const app = require('../server');
 const { pool } = require('../src/db');
+const { hashPassword } = require('../src/auth');
 
 let base;
 let passed = 0;
@@ -28,7 +29,7 @@ function client() {
     }
   };
 }
-const guest = client(), alice = client(), bob = client(), cara = client(), admin = client();
+const guest = client(), alice = client(), bob = client(), cara = client(), admin = client(), music = client(), dana = client();
 
 async function check(name, fn) {
   try {
@@ -335,6 +336,59 @@ async function main() {
     await admin.call('PATCH', '/events/3/status', { event_status: 'Cancelled' });
     assert.equal((await admin.call('DELETE', '/events/3')).status, 409);
     await admin.call('PATCH', '/events/3/status', { event_status: 'On_sale' });
+  });
+  await check('an Organizer account hosts only its own organizer\'s events', async () => {
+    // The seeded account that runs SE Music Society (organizer 1) has no password yet.
+    await pool.query('UPDATE users SET password_hash = ? WHERE email = ?', [await hashPassword('music-pass-123'), 'music@se.example.ac.th']);
+    const me = await music.call('POST', '/auth/login', { email: 'music@se.example.ac.th', password: 'music-pass-123' });
+    assert.deepEqual([me.body.role, me.body.organizer_id], ['Organizer', 1]);
+    assert.deepEqual((await music.call('GET', '/organizers')).body.map(o => o.organizer_id), [1]);
+    const all = (await music.call('GET', '/events?status=all')).body;
+    assert.ok(all.length && all.every(e => e.organizer_id === 1));
+    const event = organizer_id => ({ organizer_id, event_name: 'Band Night', event_date: '2030-03-03 19:00', venue_name: 'Hall', total_capacity: 5,
+      ticket_types: [{ type_name: 'Normal', price: 50, zone_name: 'Floor', quantity: 5 }] });
+    assert.equal((await music.call('POST', '/events', event(2))).status, 403);
+    const own = await music.call('POST', '/events', event(1));
+    assert.equal(own.status, 201, JSON.stringify(own.body));
+    assert.equal((await music.call('PATCH', `/events/${own.body.event_id}/status`, { event_status: 'Cancelled' })).status, 200);
+    assert.equal((await music.call('PATCH', '/events/3/status', { event_status: 'Cancelled' })).status, 403);   // Drama Club's
+    assert.equal((await music.call('PUT', '/events/3/image', { organizer_id: 2, image_url: 'https://x.test/a.png' })).status, 403);
+    assert.equal((await music.call('DELETE', `/events/${own.body.event_id}`)).status, 403);   // removing is admin-only
+    assert.equal((await music.call('POST', '/promotions', { coupon_code: 'MUSIC', discount_type: 'Amount', discount_amount: 5, start_date: '2026-01-01', end_date: '2030-01-01' })).status, 403);
+    assert.equal((await music.call('GET', '/reports/seat-status')).status, 403);
+    assert.equal((await music.call('PATCH', '/organizers/1/verification', { verification_status: 'Verified' })).status, 403);
+  });
+  await check('admin links an account to an organizer by its contact email, and unlinks it', async () => {
+    const r = await admin.call('POST', '/organizers', { organizer_name: 'Photo Club', contact_email: cara.email });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    assert.equal(r.body.account_email, cara.email);
+    const linked = (await cara.call('GET', '/auth/me')).body;
+    assert.deepEqual([linked.role, linked.organizer_id], ['Organizer', r.body.organizer_id]);
+    assert.equal((await admin.call('DELETE', `/organizers/${r.body.organizer_id}/account`)).body.user_id, null);
+    assert.equal((await cara.call('GET', '/auth/me')).body.role, 'Customer');
+    assert.equal((await cara.call('GET', '/organizers')).status, 403);
+    assert.equal((await admin.call('POST', `/organizers/${r.body.organizer_id}/account`)).body.account_email, cara.email);
+    await admin.call('DELETE', `/organizers/${r.body.organizer_id}/account`);
+    const nobody = await admin.call('POST', '/organizers', { organizer_name: 'Chess Club', contact_email: 'chess@test.example.com' });
+    assert.equal(nobody.body.user_id, null);
+    assert.equal((await admin.call('POST', `/organizers/${nobody.body.organizer_id}/account`)).status, 404);
+  });
+  await check('signing up as an organizer creates the account and a Pending organizer it runs', async () => {
+    const signUp = (c, body) => c.call('POST', '/auth/register-organizer', { full_name: 'Dana Host', password: PASSWORD, ...body });
+    assert.equal((await signUp(guest, { email: 'dana@test.example.com' })).status, 400);   // no organizer_name
+    assert.equal((await signUp(guest, { email: alice.email, organizer_name: 'Taken' })).status, 409);
+    assert.equal((await signUp(guest, { email: 'chess@test.example.com', organizer_name: 'Chess Again' })).status, 409);
+    const r = await signUp(dana, { email: 'dana@test.example.com', organizer_name: 'Film Club' });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    assert.equal(r.body.role, 'Organizer');
+    const [own] = (await dana.call('GET', '/organizers')).body;
+    assert.deepEqual([own.organizer_id, own.organizer_name, own.verification_status, own.account_email],
+      [r.body.organizer_id, 'Film Club', 'Pending', 'dana@test.example.com']);
+    const event = { organizer_id: own.organizer_id, event_name: 'Short Films', event_date: '2030-04-04 19:00', venue_name: 'Room 1', total_capacity: 5,
+      ticket_types: [{ type_name: 'Normal', price: 50, zone_name: 'Floor', quantity: 5 }] };
+    assert.match((await dana.call('POST', '/events', event)).body.error, /BR13/);
+    await admin.call('PATCH', `/organizers/${own.organizer_id}/verification`, { verification_status: 'Verified' });
+    assert.equal((await dana.call('POST', '/events', event)).status, 201);
   });
   await check('creates an Amount and a Percent promotion (BR26 subtypes)', async () => {
     const a = await admin.call('POST', '/promotions', { coupon_code: 'flat50', discount_type: 'Amount', discount_amount: 50, start_date: '2026-01-01', end_date: '2030-12-31' });

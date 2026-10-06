@@ -114,10 +114,11 @@ const state = {
   pay: { method: 'PromptPay', amount: '', status: 'Successful' },
   mine: [], mineTab: 'Pending',
   // The logged-in account from /api/auth/me (the session itself is an HttpOnly cookie).
-  // role 'Admin' unlocks Host, Manage and Admin.
+  // role 'Organizer' unlocks Host for their own organizer; 'Admin' unlocks Host, Manage and Admin.
   user: null, organizerId: Number(local.get('organizer')) || null, after: null,
   login: { email: '', password: '' }, loginTouched: false,
-  reg: { full_name: '', email: '', phone_number: '', password: '' }, regTouched: false, authBusy: false,
+  reg: { full_name: '', email: '', phone_number: '', password: '', organizer_name: '' }, regTouched: false, authBusy: false,
+  regAs: 'customer',   // 'organizer' also creates the organizer the account runs
   n: blankEvent(), nTouched: false,
   g: blankOffer(), gTouched: false,
   reports: { daily: [], sales: [], seats: [], usage: [], pending: [], fetchedAt: 0 },
@@ -188,22 +189,26 @@ const NEEDS = {
 };
 const VIEW_KEY = { customer: 'view', organizer: 'oview', manager: 'mview', admin: 'aview' };
 
-// Hosting events, reports and administration all need an Admin account.
+// Hosting events needs an Organizer or Admin account; promotions, reports and
+// administration need an Admin.
 const STAFF_ROLES = ['organizer', 'manager', 'admin'];
 const isAdmin = () => !!(state.user && state.user.role === 'Admin');
+const isOrganizer = () => !!(state.user && state.user.role === 'Organizer');
+const mayOpen = (role, view) => role === 'customer' || isAdmin() || (role === 'organizer' && view !== 'offer' && isOrganizer());
 
 function go(role, view) {
-  if (STAFF_ROLES.includes(role) && !isAdmin()) {
-    if (state.user) return say('Only admins can do this. Ask an admin to run npm run make-admin for your account.');
+  if (!mayOpen(role, view)) {
+    if (state.user) return say(role === 'organizer' && !isOrganizer() ? 'Only organizers and admins can do this. Ask an admin to link your account to an organizer.' : 'Only admins can do this.');
     setState({ after: null });
     go('customer', 'auth');
-    return say('Log in with an admin account first.');
+    return say('Log in with an organizer or admin account first.');
   }
   setState({ role, [VIEW_KEY[role]]: view, toast: '' });
   window.scrollTo(0, 0);
   load(...NEEDS[role][view]);
 }
-const switchRole = role => go(role, state[VIEW_KEY[role]]);
+// Back to the last screen of that side, or its first one if this account may not open it.
+const switchRole = role => go(role, mayOpen(role, state[VIEW_KEY[role]]) ? state[VIEW_KEY[role]] : Object.keys(NEEDS[role])[0]);
 const openEvent = id => {
   // A different event starts with an empty selection.
   if (!state.event || state.event.event_id !== id) setState({ event: null, selected: [], standing: {}, attendees: {}, attTouched: false });
@@ -378,7 +383,7 @@ function startSession(u, greeting) {
   setState({ after: null });
   go('customer', after || 'browse');
   load('mine').then(resumePendingHold);
-  say(greeting + (u.role === 'Admin' ? ' Host, Manage and Admin are unlocked.' : ''));
+  say(greeting + (u.role === 'Admin' ? ' Host, Manage and Admin are unlocked.' : u.role === 'Organizer' ? ' Host is unlocked for your organizer.' : ''));
 }
 
 function endSession(message) {
@@ -419,6 +424,7 @@ function regErrors(r) {
   if (!r.full_name.trim()) e.full_name = 'We need a name.';
   if (!EMAIL_RE.test(r.email.trim())) e.email = 'That email does not look right.';
   if (r.password.length < 8) e.password = 'At least 8 characters.';
+  if (state.regAs === 'organizer' && !r.organizer_name.trim()) e.organizer_name = 'Name the club or group you host for.';
   return e;
 }
 async function register() {
@@ -426,10 +432,15 @@ async function register() {
   if (Object.keys(regErrors(state.reg)).length) return say('Check the highlighted fields.');
   setState({ authBusy: true });
   try {
-    const r = state.reg;
-    const u = await api('POST', '/auth/register', { full_name: r.full_name.trim(), email: r.email.trim(), phone_number: r.phone_number.trim() || undefined, password: r.password });
-    setState({ reg: { full_name: '', email: '', phone_number: '', password: '' }, regTouched: false });
-    startSession(u, 'Account created — welcome, ' + u.full_name + '.');
+    const r = state.reg, asOrganizer = state.regAs === 'organizer';
+    const body = { full_name: r.full_name.trim(), email: r.email.trim(), phone_number: r.phone_number.trim() || undefined, password: r.password };
+    if (asOrganizer) body.organizer_name = r.organizer_name.trim();
+    const u = await api('POST', asOrganizer ? '/auth/register-organizer' : '/auth/register', body);
+    setState({ reg: { full_name: '', email: '', phone_number: '', password: '', organizer_name: '' }, regTouched: false, regAs: 'customer' });
+    if (!asOrganizer) return startSession(u, 'Account created — welcome, ' + u.full_name + '.');
+    startSession(u, 'Organizer account created.');
+    go('organizer', 'dash');
+    say(body.organizer_name + ' is Pending — you can create events once an admin verifies it (BR13).', 6000);
   } catch (err) {
     fail(err);
   } finally {
@@ -599,13 +610,21 @@ async function verifyOrganizer(id, status) {
   load('organizers');
 }
 
+async function linkAccount(id, link) {
+  try {
+    const o = await api(link ? 'POST' : 'DELETE', `/organizers/${id}/account`);
+    say(link ? o.account_email + ' now runs ' + o.organizer_name + ' and can log in to Host.' : o.organizer_name + ' has no account now — its owner is back to Customer.');
+  } catch (err) { fail(err); }
+  load('organizers');
+}
+
 async function addOrganizer() {
   const f = state.orgForm;
   if (!f.organizer_name.trim() || !EMAIL_RE.test(f.contact_email.trim())) return say('Give a name and a valid contact email.');
   try {
-    await api('POST', '/organizers', f);
+    const o = await api('POST', '/organizers', f);
     setState({ orgForm: { organizer_name: '', contact_email: '' } });
-    say('Registered as Pending — verify it before it creates events (BR13).');
+    say('Registered as Pending' + (o.account_email ? ' and linked to ' + o.account_email : '') + ' — verify it before it creates events (BR13).');
   } catch (err) { fail(err); }
   load('organizers');
 }
@@ -749,15 +768,15 @@ function header() {
     <button data-click="${() => go('customer', 'browse')}" class="btn btn-ghost" style="font-size:13px">Browse</button>
     <button data-click="${() => go('customer', 'mine')}" class="btn btn-ghost" style="font-size:13px">Reservations ${pending ? html`<span class="tag tag-accent" style="margin-left:5px;font-size:10px">${pending}</span>` : ''}</button>
   </div>` : ''}
-  ${S.role === 'organizer' ? nav('organizer', [['dash', 'Dashboard'], ['create', 'Create event'], ['offer', 'Promotions']]) : ''}
+  ${S.role === 'organizer' ? nav('organizer', [['dash', 'Dashboard'], ['create', 'Create event'], ...(isAdmin() ? [['offer', 'Promotions']] : [])]) : ''}
   ${S.role === 'manager' ? nav('manager', [['sales', 'Sales'], ['seats', 'Seat status'], ['usage', 'Promotion usage'], ['holds', 'Holds']]) : ''}
   ${S.role === 'admin' ? nav('admin', [['organizers', 'Organizers'], ['users', 'Users'], ['events', 'Events']]) : ''}
   <div style="display:flex;align-items:center;gap:var(--space-3)">
-    ${isAdmin() ? html`<div class="seg" style="font-size:12px">
-      ${[['customer', 'Attend'], ['organizer', 'Host'], ['manager', 'Manage'], ['admin', 'Admin']].map(([r, label]) =>
+    ${isAdmin() || isOrganizer() ? html`<div class="seg" style="font-size:12px">
+      ${[['customer', 'Attend'], ['organizer', 'Host'], ...(isAdmin() ? [['manager', 'Manage'], ['admin', 'Admin']] : [])].map(([r, label]) =>
         html`<button data-click="${() => switchRole(r)}" style="${seg(S.role === r)}">${label}</button>`)}
     </div>` : ''}
-    ${user ? html`<div style="display:flex;align-items:center;gap:7px" title="${user.full_name} · ${user.email}"><div style="width:26px;height:26px;border-radius:50%;background:var(--color-accent-800);color:var(--color-accent-200);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500">${user.full_name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}</div>${isAdmin() ? html`<span class="tag tag-accent" style="font-size:10.5px">Admin</span>` : ''}<button data-click="${logOut}" class="btn btn-ghost" style="font-size:12px">Log out</button></div>` : ''}
+    ${user ? html`<div style="display:flex;align-items:center;gap:7px" title="${user.full_name} · ${user.email}"><div style="width:26px;height:26px;border-radius:50%;background:var(--color-accent-800);color:var(--color-accent-200);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500">${user.full_name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}</div>${isAdmin() || isOrganizer() ? html`<span class="tag tag-accent" style="font-size:10.5px">${user.role}</span>` : ''}<button data-click="${logOut}" class="btn btn-ghost" style="font-size:12px">Log out</button></div>` : ''}
     ${!user ? html`<button data-click="${() => go('customer', 'auth')}" class="btn btn-primary" style="font-size:13px">Log in</button>` : ''}
   </div>
 </div>
@@ -1100,7 +1119,7 @@ function authView() {
 <div class="pane" data-key="auth" style="display:flex;flex-wrap:wrap;justify-content:center;gap:var(--space-8);padding-top:var(--space-8)">
   <div data-key="login" style="width:min(400px,100%);padding:var(--space-8);border-radius:var(--radius-lg);${PANEL}">
     <h1 style="font-size:24px;margin:0">Log in</h1>
-    <div style="font-size:12.5px;line-height:1.6;color:var(--color-neutral-400)">Logging in first means the ${CONFIG.holdMinutes}-minute hold is never spent on account setup. Admin accounts also unlock Host, Manage and Admin.</div>
+    <div style="font-size:12.5px;line-height:1.6;color:var(--color-neutral-400)">Logging in first means the ${CONFIG.holdMinutes}-minute hold is never spent on account setup. Organizer accounts also unlock Host for their organizer; admin accounts unlock Host, Manage and Admin.</div>
     ${field('Email', S.login.email, set('login', 'email'), { type: 'email', placeholder: 'you@student.example.ac.th', error: le.email })}
     ${field('Password', S.login.password, set('login', 'password'), { type: 'password', error: le.password })}
     <button data-click="${logIn}" ${S.authBusy ? html`disabled` : ''} class="btn btn-primary btn-block">${S.authBusy ? 'Checking…' : 'Log in'}</button>
@@ -1108,11 +1127,16 @@ function authView() {
   </div>
   <div style="width:min(400px,100%);padding:var(--space-8);border-radius:var(--radius-lg);${PANEL}">
     <h1 style="font-size:24px;margin:0">New here? Create an account</h1>
-    ${field('Full name', S.reg.full_name, set('reg', 'full_name'), { placeholder: 'Somchai Jaidee', error: e.full_name })}
+    <div class="seg" style="align-self:flex-start;font-size:12.5px">${[['customer', 'To book tickets'], ['organizer', 'To host events']].map(([k, label]) =>
+      html`<button data-click="${() => setState({ regAs: k })}" style="${seg(S.regAs === k)}">${label}</button>`)}</div>
+    ${S.regAs === 'organizer' ? html`
+    <div style="font-size:12.5px;line-height:1.6;color:var(--color-neutral-400)">Creates your login and your organizer together. You can log in to Host right away and create events once an admin verifies the organizer (BR13).</div>
+    ${field('Organizer name', S.reg.organizer_name, set('reg', 'organizer_name'), { placeholder: 'Photography Club', error: e.organizer_name })}` : ''}
+    ${field(S.regAs === 'organizer' ? 'Your name' : 'Full name', S.reg.full_name, set('reg', 'full_name'), { placeholder: 'Somchai Jaidee', error: e.full_name })}
     ${field('Email', S.reg.email, set('reg', 'email'), { type: 'email', placeholder: 'you@student.example.ac.th', error: e.email })}
     ${field('Phone (optional)', S.reg.phone_number, set('reg', 'phone_number'), { placeholder: '0812345678' })}
     ${field('Password', S.reg.password, set('reg', 'password'), { type: 'password', placeholder: 'At least 8 characters', error: e.password })}
-    <button data-click="${register}" ${S.authBusy ? html`disabled` : ''} class="btn btn-primary btn-block">Create account &amp; continue</button>
+    <button data-click="${register}" ${S.authBusy ? html`disabled` : ''} class="btn btn-primary btn-block">${S.regAs === 'organizer' ? 'Create organizer account' : 'Create account & continue'}</button>
     <div style="font-size:11.5px;color:var(--color-neutral-500)">Each email can register once (BR15).</div>
   </div>
 </div>`;
@@ -1122,6 +1146,14 @@ function authView() {
 
 function organizerPicker() {
   const S = state, org = currentOrganizer();
+  // An Organizer always acts as their own organizer; only admins can switch.
+  if (!isAdmin()) return html`
+<div style="display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap">
+  <span style="font-size:12px;color:var(--color-neutral-400)">Hosting as</span>
+  <span style="font-family:var(--font-heading);font-weight:500;font-size:14px">${org ? org.organizer_name : 'no organizer'}</span>
+  ${org ? statusPill(org.verification_status) : ''}
+</div>
+${org && org.verification_status !== 'Verified' ? html`<div style="${NOTE};border-color:var(--color-accent-700);color:var(--color-accent-300)">BR13: ${org.organizer_name} is ${org.verification_status}. An administrator must verify it before it can create events.</div>` : ''}`;
   return html`
 <div style="display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap">
   <label style="font-size:12px;color:var(--color-neutral-400)">Acting as</label>
@@ -1176,11 +1208,11 @@ function dashView() {
       <h4 style="font-size:16px;margin:0">Promotions</h4>
       ${S.promos.map(p => html`
       <div style="display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3) var(--space-4);border:1px dashed var(--color-neutral-800);border-radius:var(--radius-sm)">
-        <button data-click="${() => editImage('promo', p.promo_id, p.coupon_code + ' · ' + promoLabel(p), p.image_src)}" title="${p.image_src ? 'Change image' : 'Add image'}" style="border:0;padding:0;background:none;cursor:pointer">${thumb(p.image_src, 36, 36)}</button>
+        ${isAdmin() ? html`<button data-click="${() => editImage('promo', p.promo_id, p.coupon_code + ' · ' + promoLabel(p), p.image_src)}" title="${p.image_src ? 'Change image' : 'Add image'}" style="border:0;padding:0;background:none;cursor:pointer">${thumb(p.image_src, 36, 36)}</button>` : thumb(p.image_src, 36, 36)}
         <div style="flex:1;min-width:0"><div style="${MONO};font-size:12.5px">${p.coupon_code}</div><div style="font-size:11px;color:var(--color-neutral-500)">${promoLabel(p)} · ${dayLabel(p.start_date)} – ${dayLabel(p.end_date)}</div></div>
         <div style="font-size:11.5px;color:${p.active_today ? 'var(--color-accent-300)' : 'var(--color-neutral-600)'}">${p.active_today ? 'live' : 'off'} · ${p.times_used}</div>
       </div>`)}
-      <button data-click="${() => go('organizer', 'offer')}" class="btn btn-primary btn-block" style="font-size:12.5px">+ New promotion</button>
+      ${isAdmin() ? html`<button data-click="${() => go('organizer', 'offer')}" class="btn btn-primary btn-block" style="font-size:12.5px">+ New promotion</button>` : html`<div style="font-size:11.5px;color:var(--color-neutral-500)">Promotions are created by an admin.</div>`}
     </div>
   </div>
 </div>`;
@@ -1404,10 +1436,12 @@ function adminOrganizersView() {
   return html`
 <div class="pane" data-key="aorg" style="display:flex;flex-wrap:wrap;gap:var(--space-8);align-items:flex-start">
   <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:var(--space-4)">
-    ${h1('Organizers', 'Only verified organizers can create events (BR13).')}
+    ${h1('Organizers', 'Only verified organizers can create events (BR13). The account registered with the contact email runs the organizer.')}
     <table class="table">
-      <thead><tr><th>Organizer</th><th>Contact</th><th>Status</th><th>Verified</th><th></th></tr></thead>
-      <tbody>${S.organizers.map(o => html`<tr><td>${o.organizer_name}</td><td>${o.contact_email}</td><td>${statusPill(o.verification_status)}</td><td>${o.verified_at ? dayLabel(o.verified_at) : '—'}</td><td style="text-align:right;white-space:nowrap">
+      <thead><tr><th>Organizer</th><th>Contact</th><th>Account</th><th>Status</th><th>Verified</th><th></th></tr></thead>
+      <tbody>${S.organizers.map(o => html`<tr><td>${o.organizer_name}</td><td>${o.contact_email}</td><td style="white-space:nowrap">${o.user_id
+          ? html`<span style="font-size:12px;color:var(--color-accent-300)">linked</span> <button data-click="${() => linkAccount(o.organizer_id, false)}" class="btn btn-ghost" style="font-size:12px">Unlink</button>`
+          : html`<button data-click="${() => linkAccount(o.organizer_id, true)}" class="btn btn-ghost" style="font-size:12px">Link account</button>`}</td><td>${statusPill(o.verification_status)}</td><td>${o.verified_at ? dayLabel(o.verified_at) : '—'}</td><td style="text-align:right;white-space:nowrap">
         ${o.verification_status !== 'Verified' ? html`<button data-click="${() => verifyOrganizer(o.organizer_id, 'Verified')}" class="btn btn-primary" style="font-size:12px">Verify</button>` : ''}
         ${o.verification_status !== 'Rejected' ? html`<button data-click="${() => verifyOrganizer(o.organizer_id, 'Rejected')}" class="btn btn-ghost" style="font-size:12px">Reject</button>` : ''}
       </td></tr>`)}</tbody>

@@ -27,8 +27,9 @@ What lives where:
 | `src/services/bookings.js` | Lock → pay → sell flow, run as transactions (BR9, BR17–BR19) |
 | `src/routes/*.js` | The HTTP API |
 | `scripts/db-setup.js` | Builds the database from the `db/` files |
-| `src/auth.js`, `src/routes/auth.js` | Sign up, log in, sessions, and the "admins only" checks |
+| `src/auth.js`, `src/routes/auth.js` | Sign up, log in, sessions, and the "organizers / admins only" checks |
 | `scripts/make-admin.js` | Turns a registered account into an Admin |
+| `scripts/sample-passwords.js` | Gives the sample accounts a password for local testing |
 | `scripts/smoke-test.js` | Automatic checks of the API, the login rules and the database rules |
 
 ---
@@ -76,7 +77,20 @@ Everyone who signs up on the website is a **Customer**: they can browse and book
    ```
 3. Reload the page. You'll see an **Admin** badge next to your initials, and the **Attend / Host / Manage / Admin** switch appears.
 
-To turn an admin back into a customer, run `npm run make-admin -- your-email@example.com --remove`. The admin's password never goes into a script or SQL file: they type it on the website, and only a hash is stored.
+To turn an admin back into a customer, run `npm run make-admin -- your-email@example.com --remove`. If the account runs an organizer, it goes back to Organizer instead. The admin's password never goes into a script or SQL file: they type it on the website, and only a hash is stored.
+
+#### Organizer accounts
+
+An **Organizer** account runs one organizer (`organizers.user_id`). It gets **Attend / Host** only: it can create events for its own organizer and open, close or cancel them, and nothing else. Promotions, reports, verifying organizers and removing events stay with admins.
+
+**Creating one:** click **Log in**, choose **To host events** under *New here?*, and fill in your name, email, password and the organizer's name. That creates the Organizer account and the organizer (status **Pending**) together, already linked, and opens Host. An admin then clicks **Verify** in **Admin → Organizers**; until then the organizer can't create events (BR13).
+
+**Organizers an admin registered:** the account that runs an organizer is the one registered with the organizer's **contact email**.
+
+- When an admin registers an organizer, an existing account with that email is linked straight away.
+- If the person signs up later (with a normal account), the admin clicks **Link account** in the same table. **Unlink** turns the account back into a Customer.
+
+The sample data already has one Organizer account per organizer (`music@se.example.ac.th`, `drama@club.example.ac.th`, `hello@nml.example.com`). Like the sample customers they have no password, so they can't log in until you run `npm run sample-passwords` (local testing only). That script sets the password `password123` on every sample account.
 
 ### 6. Try the API
 
@@ -96,6 +110,7 @@ curl -b cookies.txt -X POST http://localhost:3000/api/bookings/8/payments -H "co
 | Who | Method & path | What it does |
 |---|---|---|
 | Anyone | `POST /api/auth/register` | Create a Customer account and log in (`full_name`, `email`, `password` with at least 8 characters) |
+| Anyone | `POST /api/auth/register-organizer` | Create an Organizer account plus a Pending organizer it runs, and log in (the fields above plus `organizer_name`) |
 | Anyone | `POST /api/auth/login` · `POST /api/auth/logout` | Log in or out (sets or clears the `bookify_session` cookie) |
 | Anyone | `GET /api/auth/me` | The logged-in user, or `null` |
 | Anyone | `GET /api/events` · `GET /api/events/:id` | Events on sale, and one event with every seat's status |
@@ -105,15 +120,19 @@ curl -b cookies.txt -X POST http://localhost:3000/api/bookings/8/payments -H "co
 | Logged in | `POST /api/bookings/:id/payments` | Pay your booking (`payment_method`, `amount`, optional `payment_status`) |
 | Logged in | `POST /api/bookings/:id/cancel` | Cancel your unpaid booking |
 | Logged in | `GET /api/bookings/:id` · `GET /api/users/:id/bookings` | Your own booking or reservations (admins can see anyone's) |
-| Admin | `POST /api/events` | Host a Draft event with seated and/or standing units for an organizer (see the comment in `src/routes/events.js`) |
-| Admin | `PUT /api/events/:id/image` | Replace or remove the event image (`organizer_id` plus `image_url` or `image_data`; send neither to remove). The `organizer_id` must be the event's own organizer |
-| Admin | `PATCH /api/events/:id/status` · `DELETE /api/events/:id` | Open, close or cancel an event; remove a cancelled event that has no bookings |
+| Organizer or Admin | `GET /api/events?status=all` | Events in any status (an Organizer sees only their own) |
+| Organizer or Admin | `POST /api/events` | Host a Draft event with seated and/or standing units (see the comment in `src/routes/events.js`). An Organizer may only use their own `organizer_id` |
+| Organizer or Admin | `PUT /api/events/:id/image` | Replace or remove the event image (`organizer_id` plus `image_url` or `image_data`; send neither to remove). The `organizer_id` must be the event's own organizer |
+| Organizer or Admin | `PATCH /api/events/:id/status` | Open, close or cancel an event (an Organizer only their own) |
+| Organizer or Admin | `GET /api/organizers` | Organizers (an Organizer sees only their own) |
+| Admin | `DELETE /api/events/:id` | Remove a cancelled event that has no bookings |
 | Admin | `POST /api/promotions` · `PUT /api/promotions/:id/image` | Create Amount / Percent promotions; replace or remove a promotion image |
 | Admin | `GET /api/reports/...` | `sales-last-30-days` (O1), `seat-status` (O2), `promotion-usage` (O4), `pending-bookings`, `events/:id/revenue` |
-| Admin | `/api/organizers...` | List, register and verify organizers (BR13) |
+| Admin | `POST /api/organizers` · `PATCH /api/organizers/:id/verification` | Register and verify organizers (BR13) |
+| Admin | `POST /api/organizers/:id/account` · `DELETE /api/organizers/:id/account` | Link or unlink the account registered with the organizer's contact email |
 | Admin | `GET /api/users` · `POST /api/users` · `PATCH /api/users/:id` | List users, add a user without a login, or correct a user's details |
 
-A guest who calls a login-only route gets **401 Please log in first**. A customer who calls an admin route gets **403 Only admins can do this**. The website hides nothing important: the real check happens in the API (`requireAdmin` in `src/auth.js`), so even a hand-made request can't get past it.
+A guest who calls a login-only route gets **401 Please log in first**. A customer who calls an admin route gets **403 Only admins can do this**, and an Organizer who touches another organizer's event gets **403 BR1: you can only manage your own organizer's events**. The website hides nothing important: the real checks happen in the API (`requireAdmin`, `requireHost` and `assertHostOf` in `src/auth.js`), so even a hand-made request can't get past them.
 
 #### How the login works
 
@@ -123,14 +142,14 @@ A guest who calls a login-only route gets **401 Please log in first**. A custome
 
 #### The website
 
-`npm run dev` and open http://localhost:3000. Everything on the page is read from and written to MySQL through the API above. **Log in** (top right) logs in or creates a Customer account. Admin accounts (step 5) also get a switch at the top right between the user roles in the proposal:
+`npm run dev` and open http://localhost:3000. Everything on the page is read from and written to MySQL through the API above. **Log in** (top right) logs in or creates a Customer account. Organizer accounts get an **Attend / Host** switch at the top right; admin accounts (step 5) get a switch between all the user roles in the proposal:
 
 | Role | Screens |
 |---|---|
 | Attend (customer) | Browse events and today's promotions → event page → seat map with standing zones → reserve (5-minute hold) → pay (split or failed payments allowed) → ticket codes. "Reservations" lists Pending / Paid / Expired / Cancelled bookings. Reserving needs a logged-in account. |
-| Host (admin, acting for an organizer) | Dashboard for the chosen organizer, create an event (seats and/or standing zones per ticket type), open / close / cancel sales, create Amount or Percent promotions |
+| Host (organizer, or admin acting for any organizer) | Dashboard for the organizer, create an event (seats and/or standing zones per ticket type), open / close / cancel sales. Admins also choose which organizer they act for and create Amount or Percent promotions |
 | Manage (manager) | Sales in the last 30 days and takings by payment method (O1), seat status and full events (O2), promotion usage (O4), unpaid holds with live countdowns |
-| Admin | Verify organizers (BR13), see users and their roles, correct user details, cancel and remove events |
+| Admin | Verify organizers (BR13), link organizer accounts, see users and their roles, correct user details, cancel and remove events |
 
 When the database refuses something, the page shows its message, which starts with the business rule number (for example *"BR11: event needs a ticket type…"*).
 
@@ -275,5 +294,4 @@ Create a **Web Service** from the repo, with build command `npm install` and sta
 
 ## What isn't done yet
 
-- **Organizer logins.** Organizers don't have their own accounts: an admin hosts events for them, choosing the organizer in Host.
-- **Proposal update:** login is now built, so move "User login security" from out of scope to in scope, and add `password_hash` and `role` to Users plus the `sessions` table to your entity list and ERD.
+- **Proposal update:** login is now built, so move "User login security" from out of scope to in scope, and add `password_hash` and `role` (Customer / Organizer / Admin) to Users, `user_id` to Organizers (the account that runs it, 0..1 to 0..1), and the `sessions` table to your entity list and ERD.

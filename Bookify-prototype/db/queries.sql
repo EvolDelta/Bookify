@@ -116,7 +116,8 @@ ORDER BY tickets_sold DESC;
 -- Q11 Customers who have never completed a booking (candidates for a promo).
 SELECT us.full_name, us.email
 FROM users us
-WHERE NOT EXISTS (SELECT 1 FROM bookings b WHERE b.user_id = us.user_id AND b.booking_status = 'Paid');
+WHERE us.role = 'Customer'
+  AND NOT EXISTS (SELECT 1 FROM bookings b WHERE b.user_id = us.user_id AND b.booking_status = 'Paid');
 
 -- Q12 Organizers ranked by tickets sold (window function).
 SELECT o.organizer_name, COUNT(bi.booking_item_id) AS tickets_sold,

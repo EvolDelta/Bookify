@@ -5,11 +5,6 @@
 
 -- ───────────── people ─────────────
 
-INSERT INTO organizers (organizer_id, organizer_name, contact_email, verification_status, verified_at) VALUES
-  (1, 'SE Music Society',   'music@se.example.ac.th',   'Verified', NOW() - INTERVAL 60 DAY),
-  (2, 'Drama Club',         'drama@club.example.ac.th', 'Verified', NOW() - INTERVAL 50 DAY),
-  (3, 'Night Market Live',  'hello@nml.example.com',    'Pending',  NULL);
-
 INSERT INTO users (user_id, full_name, email, phone_number) VALUES
   (1, 'Somchai Jaidee',    'somchai@student.example.ac.th', '0812345671'),
   (2, 'Suda Rakdee',       'suda@student.example.ac.th',    '0812345672'),
@@ -17,6 +12,17 @@ INSERT INTO users (user_id, full_name, email, phone_number) VALUES
   (4, 'Ploy Chanthra',     'ploy@student.example.ac.th',    '0812345674'),
   (5, 'Krit Wongsa',       'krit@student.example.ac.th',    '0812345675'),
   (6, 'Mali Srisuk',       'mali@student.example.ac.th',    '0812345676');
+
+-- The accounts that run each organizer (role Organizer).
+INSERT INTO users (user_id, full_name, email, phone_number, role) VALUES
+  (7, 'SE Music Society',  'music@se.example.ac.th',   '0812345677', 'Organizer'),
+  (8, 'Drama Club',        'drama@club.example.ac.th', '0812345678', 'Organizer'),
+  (9, 'Night Market Live', 'hello@nml.example.com',    '0812345679', 'Organizer');
+
+INSERT INTO organizers (organizer_id, organizer_name, contact_email, verification_status, verified_at, user_id) VALUES
+  (1, 'SE Music Society',   'music@se.example.ac.th',   'Verified', NOW() - INTERVAL 60 DAY, 7),
+  (2, 'Drama Club',         'drama@club.example.ac.th', 'Verified', NOW() - INTERVAL 50 DAY, 8),
+  (3, 'Night Market Live',  'hello@nml.example.com',    'Pending',  NULL,                    9);
 
 INSERT INTO ticket_type_catalog (type_id, type_name, description) VALUES
   (1, 'Normal',   'Standard admission'),

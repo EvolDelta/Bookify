@@ -4,11 +4,15 @@
 -- them under /api/reports.
 
 -- Q1 (O1) Every seat sold in the last 30 days, with sale time and price.
-SELECT e.event_name, c.type_name, u.row_label, u.seat_number, bi.price_paid, bi.sold_at, us.full_name AS buyer
+-- LEFT JOIN both subtypes: a seat has a row and number, a standing place a zone.
+SELECT e.event_name, c.type_name, u.unit_kind, s.row_label, s.seat_number, st.zone_name,
+       bi.price_paid, bi.sold_at, us.full_name AS buyer
 FROM booking_items bi
 JOIN bookings b              ON b.booking_id = bi.booking_id
 JOIN users us                ON us.user_id = b.user_id
 JOIN admission_units u       ON u.unit_id = bi.unit_id
+LEFT JOIN seated_units s     ON s.unit_id = u.unit_id
+LEFT JOIN standing_units st  ON st.unit_id = u.unit_id
 JOIN event_ticket_types ett  ON ett.event_ticket_type_id = u.event_ticket_type_id
 JOIN ticket_type_catalog c   ON c.type_id = ett.type_id
 JOIN events e                ON e.event_id = ett.event_id
@@ -53,12 +57,14 @@ GROUP BY c.type_name, ett.price;
 
 -- Q6 (O3) Who reserved which seats at which event, and what happened to the booking.
 SELECT us.full_name, e.event_name, b.booking_id, b.booking_status, b.created_at,
-       GROUP_CONCAT(COALESCE(CONCAT(u.row_label, u.seat_number), CONCAT('standing #', u.unit_id))
+       GROUP_CONCAT(COALESCE(CONCAT(s.row_label, s.seat_number), st.zone_name)
                     ORDER BY u.unit_id SEPARATOR ', ') AS units
 FROM bookings b
 JOIN users us               ON us.user_id = b.user_id
 JOIN booking_items bi       ON bi.booking_id = b.booking_id
 JOIN admission_units u      ON u.unit_id = bi.unit_id
+LEFT JOIN seated_units s    ON s.unit_id = u.unit_id
+LEFT JOIN standing_units st ON st.unit_id = u.unit_id
 JOIN event_ticket_types ett ON ett.event_ticket_type_id = u.event_ticket_type_id
 JOIN events e               ON e.event_id = ett.event_id
 GROUP BY us.full_name, e.event_name, b.booking_id, b.booking_status, b.created_at
@@ -110,7 +116,8 @@ ORDER BY tickets_sold DESC;
 -- Q11 Customers who have never completed a booking (candidates for a promo).
 SELECT us.full_name, us.email
 FROM users us
-WHERE NOT EXISTS (SELECT 1 FROM bookings b WHERE b.user_id = us.user_id AND b.booking_status = 'Paid');
+WHERE us.role = 'Customer'
+  AND NOT EXISTS (SELECT 1 FROM bookings b WHERE b.user_id = us.user_id AND b.booking_status = 'Paid');
 
 -- Q12 Organizers ranked by tickets sold (window function).
 SELECT o.organizer_name, COUNT(bi.booking_item_id) AS tickets_sold,

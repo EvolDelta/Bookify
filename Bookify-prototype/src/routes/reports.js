@@ -14,11 +14,14 @@ router.get('/sales-last-30-days', async (req, res) => {
      FROM booking_items WHERE sold_at >= NOW() - INTERVAL 30 DAY
      GROUP BY day ORDER BY day`);
   const [sales] = await pool.query(
-    `SELECT bi.sold_at, e.event_name, c.type_name, u.row_label, u.seat_number, bi.price_paid, us.full_name AS buyer
+    `SELECT bi.sold_at, e.event_name, c.type_name, u.unit_kind, s.row_label, s.seat_number, st.zone_name,
+            bi.price_paid, us.full_name AS buyer
      FROM booking_items bi
      JOIN bookings b             ON b.booking_id = bi.booking_id
      JOIN users us               ON us.user_id = b.user_id
      JOIN admission_units u      ON u.unit_id = bi.unit_id
+     LEFT JOIN seated_units s    ON s.unit_id = u.unit_id
+     LEFT JOIN standing_units st ON st.unit_id = u.unit_id
      JOIN event_ticket_types ett ON ett.event_ticket_type_id = u.event_ticket_type_id
      JOIN ticket_type_catalog c  ON c.type_id = ett.type_id
      JOIN events e               ON e.event_id = ett.event_id

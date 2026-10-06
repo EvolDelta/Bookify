@@ -3,9 +3,10 @@
 const express = require('express');
 const v = require('../validate');
 const { HttpError } = require('../errors');
-const { pool } = require('../db');
+const { pool, transaction } = require('../db');
 const { expireStaleBookings } = require('../services/bookings');
-const { requireAdmin, assertSelfOrAdmin } = require('../auth');
+const { imageSrc } = require('../images');
+const { requireAdmin, requireHost, assertSelfOrAdmin } = require('../auth');
 
 const users = express.Router();
 const organizers = express.Router();
@@ -19,6 +20,12 @@ users.post('/', requireAdmin, async (req, res) => {
   };
   const [r] = await pool.query('INSERT INTO users SET ?', [u]);
   res.status(201).json({ user_id: r.insertId, ...u });
+});
+
+// GET /api/users — user list for the administrator
+users.get('/', requireAdmin, async (req, res) => {
+  const [rows] = await pool.query('SELECT user_id, full_name, email, phone_number, role, created_at FROM users ORDER BY full_name');
+  res.json(rows);
 });
 
 // GET /api/users/:id — yourself, or anyone if you are an admin
@@ -49,12 +56,14 @@ users.get('/:id/bookings', async (req, res) => {
   await expireStaleBookings();
   const [rows] = await pool.query(
     `SELECT b.booking_id, b.booking_status, b.created_at, b.lock_expires_at, b.total_amount,
-            e.event_id, e.event_name, e.event_date, e.venue_name,
-            GROUP_CONCAT(COALESCE(CONCAT(u.row_label, u.seat_number), CONCAT('#', u.unit_id))
+            e.event_id, e.event_name, e.event_date, e.venue_name, ${imageSrc('e', 'events', 'event_id')},
+            GROUP_CONCAT(COALESCE(CONCAT(s.row_label, s.seat_number), st.zone_name)
                          ORDER BY u.unit_id SEPARATOR ', ') AS units
      FROM bookings b
      JOIN booking_items bi       ON bi.booking_id = b.booking_id
      JOIN admission_units u      ON u.unit_id = bi.unit_id
+     LEFT JOIN seated_units s    ON s.unit_id = u.unit_id
+     LEFT JOIN standing_units st ON st.unit_id = u.unit_id
      JOIN event_ticket_types ett ON ett.event_ticket_type_id = u.event_ticket_type_id
      JOIN events e               ON e.event_id = ett.event_id
      WHERE b.user_id = ?
@@ -63,32 +72,78 @@ users.get('/:id/bookings', async (req, res) => {
   res.json(rows);
 });
 
-// GET /api/organizers
-organizers.get('/', async (req, res) => {
-  const [rows] = await pool.query('SELECT * FROM organizers ORDER BY organizer_name');
+const ORGANIZERS = `
+  SELECT o.*, u.email AS account_email
+  FROM organizers o LEFT JOIN users u ON u.user_id = o.user_id`;
+
+// The account that runs an organizer is the one registered with its contact
+// email. Linking makes a Customer an Organizer; an Admin keeps their role.
+async function linkAccount(conn, organizerId) {
+  const [[o]] = await conn.query('SELECT contact_email FROM organizers WHERE organizer_id = ? FOR UPDATE', [organizerId]);
+  if (!o) throw new HttpError(404, 'Organizer not found.');
+  const [[u]] = await conn.query('SELECT user_id, role FROM users WHERE email = ?', [o.contact_email]);
+  if (!u) return false;
+  await conn.query('UPDATE organizers SET user_id = ? WHERE organizer_id = ?', [u.user_id, organizerId]);
+  if (u.role === 'Customer') await conn.query(`UPDATE users SET role = 'Organizer' WHERE user_id = ?`, [u.user_id]);
+  return true;
+}
+
+// GET /api/organizers — every organizer for an admin; an Organizer sees only their own.
+organizers.get('/', requireHost, async (req, res) => {
+  const [rows] = req.user.role === 'Admin'
+    ? await pool.query(ORGANIZERS + ' ORDER BY o.organizer_name')
+    : await pool.query(ORGANIZERS + ' WHERE o.user_id = ?', [req.user.user_id]);
   res.json(rows);
 });
 
-// POST /api/organizers  { "organizer_name", "contact_email" } — starts as Pending
-organizers.post('/', async (req, res) => {
+// POST /api/organizers  { "organizer_name", "contact_email" } — starts as Pending. Admin only.
+// If someone already registered with the contact email, their account is linked.
+organizers.post('/', requireAdmin, async (req, res) => {
   const o = {
     organizer_name: v.text(req.body.organizer_name, 'organizer_name', { max: 100 }),
     contact_email: v.email(req.body.contact_email, 'contact_email')
   };
-  const [r] = await pool.query('INSERT INTO organizers SET ?', [o]);
-  res.status(201).json({ organizer_id: r.insertId, ...o, verification_status: 'Pending' });
+  const id = await transaction(async conn => {
+    const [r] = await conn.query('INSERT INTO organizers SET ?', [o]);
+    await linkAccount(conn, r.insertId);
+    return r.insertId;
+  });
+  const [[row]] = await pool.query(ORGANIZERS + ' WHERE o.organizer_id = ?', [id]);
+  res.status(201).json(row);
+});
+
+// POST /api/organizers/:id/account — link the account registered with the contact email. Admin only.
+organizers.post('/:id/account', requireAdmin, async (req, res) => {
+  const id = v.id(req.params.id, 'id');
+  const linked = await transaction(conn => linkAccount(conn, id));
+  if (!linked) throw new HttpError(404, 'Nobody has registered with this organizer\'s contact email yet. They need to create an account with it first.');
+  const [[row]] = await pool.query(ORGANIZERS + ' WHERE o.organizer_id = ?', [id]);
+  res.json(row);
+});
+
+// DELETE /api/organizers/:id/account — unlink the account; an Organizer goes back to Customer. Admin only.
+organizers.delete('/:id/account', requireAdmin, async (req, res) => {
+  const id = v.id(req.params.id, 'id');
+  await transaction(async conn => {
+    const [[o]] = await conn.query('SELECT user_id FROM organizers WHERE organizer_id = ? FOR UPDATE', [id]);
+    if (!o) throw new HttpError(404, 'Organizer not found.');
+    await conn.query('UPDATE organizers SET user_id = NULL WHERE organizer_id = ?', [id]);
+    if (o.user_id) await conn.query(`UPDATE users SET role = 'Customer' WHERE user_id = ? AND role = 'Organizer'`, [o.user_id]);
+  });
+  const [[row]] = await pool.query(ORGANIZERS + ' WHERE o.organizer_id = ?', [id]);
+  res.json(row);
 });
 
 // PATCH /api/organizers/:id/verification  { "verification_status": "Verified" | "Rejected" | "Pending" }
-// Administrator task. Needed before the organizer can create events (BR13).
-organizers.patch('/:id/verification', async (req, res) => {
+// Admin only. Needed before the organizer can create events (BR13).
+organizers.patch('/:id/verification', requireAdmin, async (req, res) => {
   const id = v.id(req.params.id, 'id');
   const status = v.oneOf(req.body.verification_status, 'verification_status', ['Pending', 'Verified', 'Rejected']);
   const [r] = await pool.query(
     `UPDATE organizers SET verification_status = ?, verified_at = IF(? = 'Verified', NOW(), NULL)
      WHERE organizer_id = ?`, [status, status, id]);
   if (!r.affectedRows) throw new HttpError(404, 'Organizer not found.');
-  const [[o]] = await pool.query('SELECT * FROM organizers WHERE organizer_id = ?', [id]);
+  const [[o]] = await pool.query(ORGANIZERS + ' WHERE o.organizer_id = ?', [id]);
   res.json(o);
 });
 

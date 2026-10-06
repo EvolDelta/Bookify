@@ -21,16 +21,16 @@ What lives where:
 | Folder / file | Purpose |
 |---|---|
 | `db/schema.sql` | Tables, keys, CHECK / UNIQUE / FOREIGN KEY constraints (milestone M4 DDL) |
-| `db/triggers.sql` | Rules that need to look at other rows (BR10–BR13, BR16, BR22, BR25, BR26) |
+| `db/triggers.sql` | Rules that need to look at other rows (BR10–BR13, BR16, BR22–BR25) |
 | `db/seed.sql` | Sample data (milestone M4 sample data) |
 | `db/queries.sql` | 12 report queries (milestone M5 needs ≥ 10) |
 | `src/services/bookings.js` | Lock → pay → sell flow, run as transactions (BR9, BR17–BR19) |
 | `src/routes/*.js` | The HTTP API |
 | `scripts/db-setup.js` | Builds the database from the `db/` files |
-| `src/auth.js`, `src/routes/auth.js` | Sign up, log in, sessions, and the "admins only" checks |
+| `src/auth.js`, `src/routes/auth.js` | Sign up, log in, sessions, and the "organizers / admins only" checks |
 | `scripts/make-admin.js` | Turns a registered account into an Admin |
-| `scripts/smoke-test.js` | 49 automatic checks of the API, the login rules and the database rules |
-| `scripts/smoke-test.js` | Automatic checks of the API and the database rules |
+| `scripts/sample-passwords.js` | Gives the sample accounts a password for local testing |
+| `scripts/smoke-test.js` | Automatic checks of the API, the login rules and the database rules |
 
 ---
 
@@ -54,7 +54,6 @@ Open `.env` and set `DB_PASSWORD` to your local MySQL root password. `.env` is i
 ```bash
 npm install
 npm run db:setup      # creates database "bookify": tables, triggers and sample data
-npm run test:api      # 49 checks; should end with "49 checks passed."
 npm run test:api      # should end with all checks passed
 npm run dev           # http://localhost:3000 serves the site, http://localhost:3000/api/... the API
 ```
@@ -71,14 +70,27 @@ npm run dev           # http://localhost:3000 serves the site, http://localhost:
 
 Everyone who signs up on the website is a **Customer**: they can browse and book, but they can't open the **Host** side. To make an admin:
 
-1. Run `npm run dev`, open http://localhost:3000, click **Sign up**, and create your account with your own password.
+1. Run `npm run dev`, open http://localhost:3000, click **Log in**, and create your account under *New here?* with your own password.
 2. In the terminal, promote that account:
    ```bash
    npm run make-admin -- your-email@example.com
    ```
-3. Reload the page. You'll see an **Admin** badge next to your initials, and **Host** now opens.
+3. Reload the page. You'll see an **Admin** badge next to your initials, and the **Attend / Host / Manage / Admin** switch appears.
 
-To turn an admin back into a customer, run `npm run make-admin -- your-email@example.com --remove`. The admin's password never goes into a script or SQL file: they type it on the website, and only a hash is stored.
+To turn an admin back into a customer, run `npm run make-admin -- your-email@example.com --remove`. If the account runs an organizer, it goes back to Organizer instead. The admin's password never goes into a script or SQL file: they type it on the website, and only a hash is stored.
+
+#### Organizer accounts
+
+An **Organizer** account runs one organizer (`organizers.user_id`). It gets **Attend / Host** only: it can create events for its own organizer and open, close or cancel them, and nothing else. Promotions, reports, verifying organizers and removing events stay with admins.
+
+**Creating one:** click **Log in**, choose **To host events** under *New here?*, and fill in your name, email, password and the organizer's name. That creates the Organizer account and the organizer (status **Pending**) together, already linked, and opens Host. An admin then clicks **Verify** in **Admin → Organizers**; until then the organizer can't create events (BR13).
+
+**Organizers an admin registered:** the account that runs an organizer is the one registered with the organizer's **contact email**.
+
+- When an admin registers an organizer, an existing account with that email is linked straight away.
+- If the person signs up later (with a normal account), the admin clicks **Link account** in the same table. **Unlink** turns the account back into a Customer.
+
+The sample data already has one Organizer account per organizer (`music@se.example.ac.th`, `drama@club.example.ac.th`, `hello@nml.example.com`). Like the sample customers they have no password, so they can't log in until you run `npm run sample-passwords` (local testing only). That script sets the password `password123` on every sample account.
 
 ### 6. Try the API
 
@@ -98,56 +110,58 @@ curl -b cookies.txt -X POST http://localhost:3000/api/bookings/8/payments -H "co
 | Who | Method & path | What it does |
 |---|---|---|
 | Anyone | `POST /api/auth/register` | Create a Customer account and log in (`full_name`, `email`, `password` with at least 8 characters) |
+| Anyone | `POST /api/auth/register-organizer` | Create an Organizer account plus a Pending organizer it runs, and log in (the fields above plus `organizer_name`) |
 | Anyone | `POST /api/auth/login` · `POST /api/auth/logout` | Log in or out (sets or clears the `bookify_session` cookie) |
 | Anyone | `GET /api/auth/me` | The logged-in user, or `null` |
 | Anyone | `GET /api/events` · `GET /api/events/:id` | Events on sale, and one event with every seat's status |
 | Anyone | `GET /api/promotions` | Promotion codes |
+| Anyone | `GET /api/events/:id/image` · `GET /api/promotions/:id/image` | An uploaded image file |
 | Logged in | `POST /api/bookings` | Lock seats for 5 minutes (`units`, optional `promo_code`) |
 | Logged in | `POST /api/bookings/:id/payments` | Pay your booking (`payment_method`, `amount`, optional `payment_status`) |
 | Logged in | `POST /api/bookings/:id/cancel` | Cancel your unpaid booking |
 | Logged in | `GET /api/bookings/:id` · `GET /api/users/:id/bookings` | Your own booking or reservations (admins can see anyone's) |
-| Admin | `POST /api/events` | Host a Draft event with its seats (see the comment in `src/routes/events.js`) |
-| Admin | `PATCH /api/events/:id/status` · `DELETE /api/events/:id` | Open, close or cancel an event; remove a cancelled event that has no bookings |
-| Admin | `POST /api/promotions` | Create Amount / Percent promotions |
+| Organizer or Admin | `GET /api/events?status=all` | Events in any status (an Organizer sees only their own) |
+| Organizer or Admin | `POST /api/events` | Host a Draft event with seated and/or standing units (see the comment in `src/routes/events.js`). An Organizer may only use their own `organizer_id` |
+| Organizer or Admin | `PUT /api/events/:id/image` | Replace or remove the event image (`organizer_id` plus `image_url` or `image_data`; send neither to remove). The `organizer_id` must be the event's own organizer |
+| Organizer or Admin | `PATCH /api/events/:id/status` | Open, close or cancel an event (an Organizer only their own) |
+| Organizer or Admin | `GET /api/organizers` | Organizers (an Organizer sees only their own) |
+| Admin | `DELETE /api/events/:id` | Remove a cancelled event that has no bookings |
+| Admin | `POST /api/promotions` · `PUT /api/promotions/:id/image` | Create Amount / Percent promotions; replace or remove a promotion image |
 | Admin | `GET /api/reports/...` | `sales-last-30-days` (O1), `seat-status` (O2), `promotion-usage` (O4), `pending-bookings`, `events/:id/revenue` |
-| Admin | `/api/organizers...` | List, register and verify organizers (BR13) |
-| Admin | `POST /api/users` · `PATCH /api/users/:id` | Add a user, or correct a user's details |
+| Admin | `POST /api/organizers` · `PATCH /api/organizers/:id/verification` | Register and verify organizers (BR13) |
+| Admin | `POST /api/organizers/:id/account` · `DELETE /api/organizers/:id/account` | Link or unlink the account registered with the organizer's contact email |
+| Admin | `GET /api/users` · `POST /api/users` · `PATCH /api/users/:id` | List users, add a user without a login, or correct a user's details |
 
-A guest who calls a login-only route gets **401 Please log in first**. A customer who calls an admin route gets **403 Only admins can do this**. The website hides nothing important: the real check happens in the API (`requireAdmin` in `src/auth.js`), so even a hand-made request can't get past it.
+A guest who calls a login-only route gets **401 Please log in first**. A customer who calls an admin route gets **403 Only admins can do this**, and an Organizer who touches another organizer's event gets **403 BR1: you can only manage your own organizer's events**. The website hides nothing important: the real checks happen in the API (`requireAdmin`, `requireHost` and `assertHostOf` in `src/auth.js`), so even a hand-made request can't get past them.
 
 #### How the login works
 
 - **Passwords** are stored as a salted **scrypt** hash in `users.password_hash`, like `scrypt$16384$8$1$<salt>$<hash>`. The same password gives a different hash for every user, and the hash can't be turned back into the password.
 - **Sessions:** after login, the browser gets a random token in an **HttpOnly** cookie, which page JavaScript can't read. The `sessions` table stores only the SHA-256 hash of that token, and a session lasts 7 days.
 - A wrong password and an unknown email get the same message, *"Wrong email or password."*, so nobody can find out which emails have accounts.
-| Customer | `GET /api/events` | Events on sale with available / locked / sold counts |
-| Customer | `GET /api/events/:id` | One event, its ticket types, optional standing zone and every unit's status |
-| Customer | `POST /api/users` | Register (`full_name`, `email`, `phone_number`) |
-| Customer | `POST /api/bookings` | Lock seats for 5 minutes (`user_id`, `units`, optional `promo_code`) |
-| Customer | `POST /api/bookings/:id/payments` | Record a payment (`payment_method`, `amount`, optional `payment_status`) |
-| Customer | `POST /api/bookings/:id/cancel` | Cancel an unpaid booking (`user_id`) |
-| Customer | `GET /api/users/:id/bookings` | "My reservations" |
-| Organizer | `POST /api/events` | Create a Draft event with seats and optionally one standing zone (see `src/routes/events.js`) |
-| Organizer | `PATCH /api/events/:id/status` | `On_sale` / `Closed` / `Cancelled` |
-| Organizer | `GET/POST /api/promotions` | List or create Amount / Percent promotions |
-| Manager | `GET /api/reports/sales-last-30-days` | O1 |
-| Manager | `GET /api/reports/seat-status` | O2: which events are full |
-| Manager | `GET /api/reports/promotion-usage` | O4 |
-| Manager | `GET /api/reports/pending-bookings` | Unpaid holds and their remaining time |
-| Manager | `GET /api/reports/events/:id/revenue` | Takings split by payment method |
-| Admin | `POST /api/organizers`, `PATCH /api/organizers/:id/verification` | Register and verify organizers (BR13) |
-| Admin | `PATCH /api/users/:id` | Correct a user's details |
-| Admin | `DELETE /api/events/:id` | Remove a cancelled event that has no bookings |
 
-Login is out of scope in your proposal, so the API trusts the `user_id` the client sends. A real system would get it from a login session instead.
+#### The website
 
-When creating a seated event, the organizer may omit a standing zone or add one by including a `standing_zone` name and `quantity` on a ticket type. The units are counted against the same `total_capacity` as seats. The prototype has no login or role middleware, so it cannot verify whether a request comes from the organizer, host, or an admin; a production deployment must authorize those roles before allowing event changes.
+`npm run dev` and open http://localhost:3000. Everything on the page is read from and written to MySQL through the API above. **Log in** (top right) logs in or creates a Customer account. Organizer accounts get an **Attend / Host** switch at the top right; admin accounts (step 5) get a switch between all the user roles in the proposal:
+
+| Role | Screens |
+|---|---|
+| Attend (customer) | Browse events and today's promotions → event page → seat map with standing zones → reserve (5-minute hold) → pay (split or failed payments allowed) → ticket codes. "Reservations" lists Pending / Paid / Expired / Cancelled bookings. Reserving needs a logged-in account. |
+| Host (organizer, or admin acting for any organizer) | Dashboard for the organizer, create an event (seats and/or standing zones per ticket type), open / close / cancel sales. Admins also choose which organizer they act for and create Amount or Percent promotions |
+| Manage (manager) | Sales in the last 30 days and takings by payment method (O1), seat status and full events (O2), promotion usage (O4), unpaid holds with live countdowns |
+| Admin | Verify organizers (BR13), link organizer accounts, see users and their roles, correct user details, cancel and remove events |
+
+When the database refuses something, the page shows its message, which starts with the business rule number (for example *"BR11: event needs a ticket type…"*).
+
+An event has no "kind" of its own. Each ticket type describes numbered seats (`rows` + `seats_per_row`), standing places (`zone_name` + `quantity`), or both, so one event can be all seated, all standing, or a mix. Seats become `seated_units` rows and standing places become `standing_units` rows; all of them count against the same `total_capacity`.
 
 Example ticket type that includes both seats and standing places at the same price:
 ```json
-{ "type_name": "Normal", "price": 300, "rows": ["B"], "seats_per_row": 20, "standing_zone": "Lawn", "quantity": 80 }
+{ "type_name": "Normal", "price": 300, "rows": ["B"], "seats_per_row": 20, "zone_name": "Lawn", "quantity": 80 }
 ```
-Include it alongside the usual seated ticket types. A ticket type can describe seats, standing places, or both; seats and standing places in one ticket type share its price. All ticket types marked with `standing_zone` for one event must use the same zone name. Omitting the property keeps the event seated-only. `GET /api/events/:id` returns `standing_zone` as the configured name or `null`; each unit also reports its `standing_zone` (or `null` for a numbered seat).
+Events and promotions may have an image. `POST /api/events`, `POST /api/promotions` and the `PUT …/image` routes accept either `"image_url": "https://…"` (a link) or `"image_data": "data:image/jpeg;base64,…"` (an uploaded PNG, JPEG, WebP or GIF of at most 2 MB). Uploaded files are stored in MySQL (`image_data MEDIUMBLOB`) rather than on disk, because serverless hosts such as Vercel have no lasting disk. Every listing returns a ready-to-use `image_src`: the link, or `/api/events/:id/image?v=…` for an upload, where `v` changes whenever the image does so browsers never show a stale copy. The website shrinks large photos to 1600 px before uploading.
+
+`GET /api/events/:id` reports `seated_units` / `standing_units` counts, and each unit carries `unit_kind` plus either `row_label` and `seat_number` (Seated) or `zone_name` (Standing); the other fields are `null`. Bookings with more than 2 units need `attendee_name` and `identity_number` on every unit beyond the second (BR24).
 
 ---
 
@@ -163,26 +177,26 @@ A good rule of thumb: **put a rule as low as it can go.** If the database itself
 | BR7 "at most one ticket per item" | `UNIQUE (booking_item_id)` on tickets | schema.sql |
 | BR8 "at most one promotion" | A single `promo_id` column on bookings; one column can't hold two | schema.sql |
 | BR9 "at least one item" | Transaction in `createBooking` (SQL can't say "at least one child row") | bookings.js |
-| BR10 / BR23 / BR24 disjoint + total | Composite FK `(event_id, event_kind)` + `CHECK (event_kind='Seated')` makes it disjoint; `trg_events_bu` makes it total before going on sale | schema.sql, triggers.sql |
+| BR10 / BR25 / BR26 disjoint + total | Composite FK `(unit_id, unit_kind)` + `CHECK (unit_kind='Seated')` makes it disjoint; `trg_events_bu` makes Admission_Units total before going on sale. Promotions use the same composite FK | schema.sql, triggers.sql |
 | BR11 | `trg_events_bu` | triggers.sql |
 | BR12 | `trg_tickets_bi` | triggers.sql |
 | BR13 | `trg_events_bi` | triggers.sql |
 | BR14 allowed values | `ENUM(...)` columns | schema.sql |
 | BR15 uniqueness | `UNIQUE` constraints | schema.sql |
-| BR16 | `CHECK` (seat/standing location shape) + `trg_units_bi/bu` (seated unit must be a seat or a matching optional standing zone) | both |
+| BR16 | `NOT NULL` row/seat on `seated_units`, `zone_name` on `standing_units` + `trg_seated_units_bi/bu` (row + seat unique within the event) | both |
 | BR17 5-minute lock | `CHECK (lock_expires_at = created_at + INTERVAL 5 MINUTE)` | schema.sql |
 | BR18 expiry | `expireStaleBookings()` | bookings.js |
 | BR19 paid when payments cover total | `payBooking()` | bookings.js |
 | BR20 sold once only | Generated column + `UNIQUE` (explained below) | schema.sql |
 | BR21 price > 0, frozen prices | `CHECK`; `price_paid` / `discount_amount_applied` copied at sale time | both |
 | BR22 capacity, promotion period | `trg_units_bi`, `trg_bookings_bi` | triggers.sql |
-| BR25 | `CHECK (event_date > created_at)` + `trg_booking_items_bi` | both |
-| BR26 2-ticket ceiling | `trg_booking_items_bi` + attendee columns on booking_items | both |
+| BR23 | `CHECK (event_date > created_at)` + `trg_booking_items_bi` | both |
+| BR24 2-ticket ceiling, one identity per event | `trg_booking_items_bi` + `attendee_name` / `identity_number` on booking_items | both |
 
 ### Five ideas worth understanding
 
 **1. The subtype pattern (EER specialisation in SQL).**
-`seated_events` stores a fixed `event_kind = 'Seated'` and points at `events(event_id, event_kind)`, a *composite* foreign key. If you try to add a `non_seated_events` row for a seated event, the pair `(1, 'Non_Seated')` doesn't exist in `events`, so the database refuses it. That's how "disjoint" becomes a constraint and not just a sentence. Promotions use the same pattern.
+`seated_units` stores a fixed `unit_kind = 'Seated'` and points at `admission_units(unit_id, unit_kind)`, a *composite* foreign key. If you try to add a `standing_units` row for a seated unit, the pair `(1, 'Standing')` doesn't exist in `admission_units`, so the database refuses it. That's how "disjoint" becomes a constraint and not just a sentence. Promotions use the same pattern.
 
 **2. "Sold once and only once" (BR20) with a generated column.**
 ```sql
@@ -208,10 +222,10 @@ Holds expire lazily. Before any request reads seat status, `expireStaleBookings(
 
 Try each of these in Workbench and read the error message. Each one should fail:
 ```sql
-INSERT INTO non_seated_events (event_id, zone_name) VALUES (1, 'Lawn');          -- BR23
+INSERT INTO standing_units (unit_id, zone_name) VALUES (1, 'Lawn');             -- BR25
 INSERT INTO tickets (booking_item_id, ticket_code) VALUES (12, 'X');              -- BR12
 UPDATE bookings SET booking_status = 'Refunded' WHERE booking_id = 1;             -- BR14
-INSERT INTO admission_units (event_ticket_type_id, row_label, seat_number) VALUES (1, 'A', 1);  -- BR16
+UPDATE seated_units SET row_label = 'A', seat_number = 2 WHERE unit_id = 1;     -- BR16
 ```
 Next, open two Workbench tabs and recreate the race by hand. In tab 1 run `START TRANSACTION; SELECT * FROM admission_units WHERE unit_id = 20 FOR UPDATE;`. In tab 2 run the same two lines and watch it hang. Then run `COMMIT;` in tab 1, and tab 2 continues.
 
@@ -280,5 +294,4 @@ Create a **Web Service** from the repo, with build command `npm install` and sta
 
 ## What isn't done yet
 
-- **Only login is connected to the API.** Sign up, Log in, Sign out and the Host lock use the real accounts. Events, seats, bookings and the Host dashboard in `public/app.js` are still in-memory demo data (with euros, a 6-seat limit and card payment). Connecting them means replacing those arrays with `fetch('/api/…')` calls.
-- **Proposal update:** login is now built, so move "User login security" from out of scope to in scope, and add `password_hash` and `role` to Users plus the `sessions` table to your entity list and ERD.
+- **Proposal update:** login is now built, so move "User login security" from out of scope to in scope, and add `password_hash` and `role` (Customer / Organizer / Admin) to Users, `user_id` to Organizers (the account that runs it, 0..1 to 0..1), and the `sessions` table to your entity list and ERD.

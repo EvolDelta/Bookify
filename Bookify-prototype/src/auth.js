@@ -89,8 +89,9 @@ async function loadUser(req, res, next) {
   const token = readCookie(req);
   if (token) {
     const [[user]] = await pool.query(
-      `SELECT u.user_id, u.full_name, u.email, u.phone_number, u.role
+      `SELECT u.user_id, u.full_name, u.email, u.phone_number, u.role, o.organizer_id
        FROM sessions s JOIN users u ON u.user_id = s.user_id
+       LEFT JOIN organizers o ON o.user_id = u.user_id
        WHERE s.token_hash = ? AND s.expires_at > NOW()`, [sha256(token)]);
     req.user = user || null;
   }
@@ -108,6 +109,19 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// Hosting events: Admins (for any organizer) and Organizers (for their own).
+function requireHost(req, res, next) {
+  if (!req.user) throw new HttpError(401, 'Please log in first.');
+  if (req.user.role !== 'Admin' && req.user.role !== 'Organizer') throw new HttpError(403, 'Only organizers and admins can do this.');
+  next();
+}
+
+// An Organizer may only act for the organizer their account runs (BR1).
+function assertHostOf(req, organizerId) {
+  if (req.user.role === 'Admin') return;
+  if (req.user.organizer_id !== organizerId) throw new HttpError(403, 'BR1: you can only manage your own organizer\'s events.');
+}
+
 // For "my own data, or any data if you are an admin".
 function assertSelfOrAdmin(req, userId) {
   if (!req.user) throw new HttpError(401, 'Please log in first.');
@@ -118,5 +132,5 @@ function assertSelfOrAdmin(req, userId) {
 
 module.exports = {
   hashPassword, verifyPassword, burnTime, startSession, endSession,
-  loadUser, requireUser, requireAdmin, assertSelfOrAdmin
+  loadUser, requireUser, requireAdmin, requireHost, assertHostOf, assertSelfOrAdmin
 };

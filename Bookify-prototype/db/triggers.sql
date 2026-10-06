@@ -6,9 +6,11 @@
 -- Run after schema.sql. In MySQL Workbench run the whole file as-is; the
 -- DELIMITER lines let a trigger body contain semicolons.
 -- (Triggers are dropped together with their tables in schema.sql; the shared
--- procedure is not, so drop it here.)
+-- procedure is not, so drop it here. check_admission_unit is from an older
+-- version of this file.)
 
 DROP PROCEDURE IF EXISTS check_admission_unit;
+DROP PROCEDURE IF EXISTS check_seat_unique;
 
 DELIMITER $$
 
@@ -22,88 +24,83 @@ BEGIN
   END IF;
 END$$
 
--- BR10/BR23 (totality) and BR11: an event can only go on sale once it has its
--- subtype row, at least one ticket type and at least one admission unit.
+-- BR11, and BR10/BR25 (totality): an event can only go on sale once it has at
+-- least one ticket type with admission units, and every one of those units has
+-- its Seated_Unit or Standing_Unit row.
 CREATE TRIGGER trg_events_bu BEFORE UPDATE ON events
 FOR EACH ROW
 BEGIN
   IF NEW.event_status = 'On_sale' AND OLD.event_status <> 'On_sale' THEN
-    IF (NEW.event_kind = 'Seated'     AND NOT EXISTS (SELECT 1 FROM seated_events     WHERE event_id = NEW.event_id))
-    OR (NEW.event_kind = 'Non_Seated' AND NOT EXISTS (SELECT 1 FROM non_seated_events WHERE event_id = NEW.event_id)) THEN
-      SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR10: event has no Seated_Event / Non_Seated_Event row';
-    END IF;
     IF NOT EXISTS (SELECT 1 FROM event_ticket_types ett
                    JOIN admission_units u ON u.event_ticket_type_id = ett.event_ticket_type_id
                    WHERE ett.event_id = NEW.event_id) THEN
       SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR11: event needs a ticket type and admission units before going on sale';
     END IF;
+    IF EXISTS (SELECT 1 FROM event_ticket_types ett
+               JOIN admission_units u ON u.event_ticket_type_id = ett.event_ticket_type_id
+               LEFT JOIN seated_units s    ON s.unit_id = u.unit_id
+               LEFT JOIN standing_units st ON st.unit_id = u.unit_id
+               WHERE ett.event_id = NEW.event_id AND s.unit_id IS NULL AND st.unit_id IS NULL) THEN
+      SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR25: every admission unit needs a Seated_Unit or Standing_Unit row';
+    END IF;
   END IF;
 END$$
 
--- BR16 and BR22, shared by the insert and update triggers below.
-CREATE PROCEDURE check_admission_unit(
-  IN p_unit_id INT, IN p_ett_id INT, IN p_row VARCHAR(5), IN p_seat INT,
-  IN p_zone_id INT, IN p_is_insert BOOLEAN)
+-- BR22: never more units than the event's capacity.
+CREATE TRIGGER trg_units_bi BEFORE INSERT ON admission_units
+FOR EACH ROW
 BEGIN
-  DECLARE v_event_id INT;
-  DECLARE v_kind VARCHAR(20);
-  DECLARE v_capacity INT;
-
-  SELECT e.event_id, e.event_kind, e.total_capacity INTO v_event_id, v_kind, v_capacity
-  FROM event_ticket_types ett JOIN events e ON e.event_id = ett.event_id
-  WHERE ett.event_ticket_type_id = p_ett_id;
-
-  -- BR16: a seated event unit is either a numbered seat or in its optional stand zone.
-  IF v_kind = 'Seated' AND p_row IS NULL AND p_zone_id IS NULL THEN
-    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR16: a seated event unit needs a seat or standing zone';
-  END IF;
-  IF v_kind = 'Non_Seated' AND p_row IS NOT NULL THEN
-    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR16: a unit of a non-seated event has no row_label or seat_number';
-  END IF;
-  IF v_kind = 'Non_Seated' AND p_zone_id IS NOT NULL THEN
-    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR16: non-seated units use their event zone';
-  END IF;
-  IF p_row IS NOT NULL AND p_zone_id IS NOT NULL THEN
-    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR16: a unit cannot be both a seat and a standing place';
-  END IF;
-  IF p_zone_id IS NOT NULL AND NOT EXISTS (
-       SELECT 1 FROM standing_zones WHERE standing_zone_id = p_zone_id AND event_id = v_event_id) THEN
-    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR16: standing zone must belong to the unit event';
-  END IF;
-
-  -- BR16: row + seat is unique within the whole event (across all ticket types)
-  IF p_row IS NOT NULL AND EXISTS (
-       SELECT 1 FROM admission_units u
-       JOIN event_ticket_types ett ON ett.event_ticket_type_id = u.event_ticket_type_id
-       WHERE ett.event_id = v_event_id AND u.row_label = p_row AND u.seat_number = p_seat
-         AND u.unit_id <> IFNULL(p_unit_id, 0)) THEN
-    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR16: that row and seat already exist in this event';
-  END IF;
-
-  -- BR22: never more units than the event's capacity
-  IF p_is_insert AND (SELECT COUNT(*) FROM admission_units u
-                      JOIN event_ticket_types ett ON ett.event_ticket_type_id = u.event_ticket_type_id
-                      WHERE ett.event_id = v_event_id) >= v_capacity THEN
+  IF (SELECT COUNT(*) FROM admission_units u
+      JOIN event_ticket_types ett ON ett.event_ticket_type_id = u.event_ticket_type_id
+      WHERE ett.event_id = (SELECT event_id FROM event_ticket_types
+                            WHERE event_ticket_type_id = NEW.event_ticket_type_id))
+     >= (SELECT e.total_capacity FROM event_ticket_types ett JOIN events e ON e.event_id = ett.event_id
+         WHERE ett.event_ticket_type_id = NEW.event_ticket_type_id) THEN
     SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR22: event already has total_capacity admission units';
   END IF;
 END$$
 
-CREATE TRIGGER trg_units_bi BEFORE INSERT ON admission_units
+-- BR16: row + seat is unique within the whole event (across all ticket types).
+-- Shared by the insert and update triggers on seated_units.
+CREATE PROCEDURE check_seat_unique(IN p_unit_id INT, IN p_ett_id INT, IN p_row VARCHAR(5), IN p_seat INT)
+BEGIN
+  IF EXISTS (SELECT 1 FROM seated_units s
+             JOIN admission_units u      ON u.unit_id = s.unit_id
+             JOIN event_ticket_types ett ON ett.event_ticket_type_id = u.event_ticket_type_id
+             WHERE ett.event_id = (SELECT event_id FROM event_ticket_types WHERE event_ticket_type_id = p_ett_id)
+               AND s.row_label = p_row AND s.seat_number = p_seat AND s.unit_id <> p_unit_id) THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR16: that row and seat already exist in this event';
+  END IF;
+END$$
+
+CREATE TRIGGER trg_seated_units_bi BEFORE INSERT ON seated_units
 FOR EACH ROW
 BEGIN
-  CALL check_admission_unit(NULL, NEW.event_ticket_type_id, NEW.row_label, NEW.seat_number,
-                            NEW.standing_zone_id, TRUE);
+  CALL check_seat_unique(NEW.unit_id,
+    (SELECT event_ticket_type_id FROM admission_units WHERE unit_id = NEW.unit_id),
+    NEW.row_label, NEW.seat_number);
+END$$
+
+CREATE TRIGGER trg_seated_units_bu BEFORE UPDATE ON seated_units
+FOR EACH ROW
+BEGIN
+  IF NOT (NEW.row_label <=> OLD.row_label) OR NOT (NEW.seat_number <=> OLD.seat_number) THEN
+    CALL check_seat_unique(NEW.unit_id,
+      (SELECT event_ticket_type_id FROM admission_units WHERE unit_id = NEW.unit_id),
+      NEW.row_label, NEW.seat_number);
+  END IF;
 END$$
 
 CREATE TRIGGER trg_units_bu BEFORE UPDATE ON admission_units
 FOR EACH ROW
 BEGIN
-  -- status changes happen thousands of times; only re-check when the seat itself moves
-  IF NOT (NEW.event_ticket_type_id <=> OLD.event_ticket_type_id)
-     OR NOT (NEW.row_label <=> OLD.row_label) OR NOT (NEW.seat_number <=> OLD.seat_number)
-     OR NOT (NEW.standing_zone_id <=> OLD.standing_zone_id) THEN
-    CALL check_admission_unit(OLD.unit_id, NEW.event_ticket_type_id, NEW.row_label, NEW.seat_number,
-                              NEW.standing_zone_id, FALSE);
+  -- status changes happen thousands of times; only check when the unit moves.
+  -- Staying inside its event keeps BR16 and BR22 true without re-checking them.
+  IF NOT (NEW.event_ticket_type_id <=> OLD.event_ticket_type_id) THEN
+    IF (SELECT event_id FROM event_ticket_types WHERE event_ticket_type_id = NEW.event_ticket_type_id)
+       <> (SELECT event_id FROM event_ticket_types WHERE event_ticket_type_id = OLD.event_ticket_type_id) THEN
+      SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR3: a unit cannot move to a ticket type of another event';
+    END IF;
   END IF;
 END$$
 
@@ -121,23 +118,33 @@ END$$
 CREATE TRIGGER trg_booking_items_bi BEFORE INSERT ON booking_items
 FOR EACH ROW
 BEGIN
-  -- BR25: cannot book an event that has already happened
+  -- BR23: cannot book an event that has already happened
   IF EXISTS (SELECT 1 FROM bookings b, admission_units u
              JOIN event_ticket_types ett ON ett.event_ticket_type_id = u.event_ticket_type_id
              JOIN events e ON e.event_id = ett.event_id
              WHERE b.booking_id = NEW.booking_id AND u.unit_id = NEW.unit_id
                AND b.created_at >= e.event_date) THEN
-    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR25: booking was created after the event date';
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR23: booking was created after the event date';
   END IF;
 
-  -- BR26: past the 2-ticket ceiling every extra unit needs its own attendee details
+  -- BR24: past the 2-ticket ceiling every extra unit needs its own attendee details
   IF (SELECT COUNT(*) FROM booking_items WHERE booking_id = NEW.booking_id) >= 2
-     AND (NULLIF(TRIM(NEW.attendee_name), '') IS NULL OR NULLIF(TRIM(NEW.attendee_id_number), '') IS NULL) THEN
-    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR26: tickets beyond the 2nd need attendee_name and attendee_id_number';
+     AND (NULLIF(TRIM(NEW.attendee_name), '') IS NULL OR NULLIF(TRIM(NEW.identity_number), '') IS NULL) THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR24: tickets beyond the 2nd need attendee_name and identity_number';
   END IF;
-  IF NEW.attendee_id_number IS NOT NULL AND EXISTS (
-       SELECT 1 FROM booking_items WHERE booking_id = NEW.booking_id AND attendee_id_number = NEW.attendee_id_number) THEN
-    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR26: each attendee in a booking must be a different person';
+  -- BR24: one identity_number per event. Expired and cancelled bookings no
+  -- longer hold a place, so they do not count.
+  IF NEW.identity_number IS NOT NULL AND EXISTS (
+       SELECT 1 FROM booking_items bi
+       JOIN bookings b             ON b.booking_id = bi.booking_id
+       JOIN admission_units u      ON u.unit_id = bi.unit_id
+       JOIN event_ticket_types ett ON ett.event_ticket_type_id = u.event_ticket_type_id
+       WHERE bi.identity_number = NEW.identity_number
+         AND b.booking_status IN ('Pending','Paid')
+         AND ett.event_id = (SELECT ett2.event_id FROM admission_units u2
+                             JOIN event_ticket_types ett2 ON ett2.event_ticket_type_id = u2.event_ticket_type_id
+                             WHERE u2.unit_id = NEW.unit_id)) THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR24: that identity_number already holds a ticket for this event';
   END IF;
 END$$
 

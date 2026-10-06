@@ -9,7 +9,8 @@
     "db:setup": "node scripts/db-setup.js",
     "db:schema": "node scripts/db-setup.js --no-seed",
     "test:api": "node scripts/smoke-test.js",
-    "make-admin": "node scripts/make-admin.js"
+    "make-admin": "node scripts/make-admin.js",
+    "sample-passwords": "node scripts/sample-passwords.js"
   },
   "keywords": [],
   "author": "",

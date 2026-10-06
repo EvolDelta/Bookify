@@ -6,7 +6,7 @@ const { pool, transaction } = require('../db');
 const { HttpError } = require('../errors');
 
 const HOLD_MINUTES = 5;        // BR17 — schema.sql's ck_bookings_lock uses the same 5
-const FREE_SEATS_WITHOUT_ID = 2; // BR26
+const FREE_SEATS_WITHOUT_ID = 2; // BR24
 
 // BR18: unpaid bookings past lock_expires_at become Expired and give their
 // seats back. This runs at the start of every request that reads or changes
@@ -31,7 +31,7 @@ async function expire(conn, bookingIds) {
   await conn.query(`UPDATE bookings SET booking_status = 'Expired' WHERE booking_id IN (?)`, [bookingIds]);
 }
 
-// Price of a promotion for a given subtotal (BR24 subtypes).
+// Price of a promotion for a given subtotal (BR26 subtypes).
 function discountFor(promo, subtotal) {
   if (!promo) return 0;
   const raw = promo.discount_type === 'Amount'
@@ -43,7 +43,7 @@ function discountFor(promo, subtotal) {
 
 /**
  * Lock seats for a user for HOLD_MINUTES (BR17).
- * units: [{ unit_id, attendee_name?, attendee_id_number? }]
+ * units: [{ unit_id, attendee_name?, identity_number? }]
  */
 async function createBooking({ userId, units, promoCode }) {
   await expireStaleBookings();
@@ -55,11 +55,14 @@ async function createBooking({ userId, units, promoCode }) {
     // same seat waits here until this transaction ends, then sees it Locked —
     // that wait is what makes double booking impossible.
     const [rows] = await conn.query(
-      `SELECT u.unit_id, u.unit_status, u.row_label, u.seat_number, ett.price,
+      `SELECT u.unit_id, u.unit_status, ett.price,
+              COALESCE(CONCAT(s.row_label, s.seat_number), st.zone_name) AS label,
               e.event_id, e.event_status, e.event_date > NOW() AS upcoming
        FROM admission_units u
        JOIN event_ticket_types ett ON ett.event_ticket_type_id = u.event_ticket_type_id
        JOIN events e ON e.event_id = ett.event_id
+       LEFT JOIN seated_units s    ON s.unit_id = u.unit_id
+       LEFT JOIN standing_units st ON st.unit_id = u.unit_id
        WHERE u.unit_id IN (?)
        ORDER BY u.unit_id
        FOR UPDATE OF u`, [unitIds]);
@@ -68,10 +71,14 @@ async function createBooking({ userId, units, promoCode }) {
     if (new Set(rows.map(r => r.event_id)).size > 1) throw new HttpError(400, 'All seats in one booking must be for the same event.');
     const ev = rows[0];
     if (ev.event_status !== 'On_sale') throw new HttpError(409, `This event is not on sale (status: ${ev.event_status}).`);
-    if (!ev.upcoming) throw new HttpError(409, 'BR25: this event has already taken place.');
+    if (!ev.upcoming) throw new HttpError(409, 'BR23: this event has already taken place.');
+    const incomplete = rows.filter(r => r.label === null);
+    if (incomplete.length) {
+      throw new HttpError(409, `BR25: unit ${incomplete.map(r => '#' + r.unit_id).join(', ')} has no seat or standing details.`);
+    }
     const taken = rows.filter(r => r.unit_status !== 'Available');
     if (taken.length) {
-      throw new HttpError(409, `Already taken: ${taken.map(r => r.row_label ? r.row_label + r.seat_number : '#' + r.unit_id).join(', ')}.`);
+      throw new HttpError(409, `Already taken: ${taken.map(r => r.label).join(', ')}.`);
     }
 
     let promo = null;
@@ -99,13 +106,13 @@ async function createBooking({ userId, units, promoCode }) {
     const bookingId = res.insertId;
 
     // Units without attendee details first, so the ones that carry them are the
-    // 3rd+ items that BR26 (trg_booking_items_bi) asks about.
+    // 3rd+ items that BR24 (trg_booking_items_bi) asks about.
     const ordered = [...units].sort((a, b) => Boolean(a.attendee_name) - Boolean(b.attendee_name));
     for (const u of ordered) {
       await conn.query(
-        `INSERT INTO booking_items (booking_id, unit_id, price_paid, attendee_name, attendee_id_number)
+        `INSERT INTO booking_items (booking_id, unit_id, price_paid, attendee_name, identity_number)
          VALUES (?, ?, ?, ?, ?)`,
-        [bookingId, u.unit_id, priceOf.get(u.unit_id), u.attendee_name || null, u.attendee_id_number || null]);
+        [bookingId, u.unit_id, priceOf.get(u.unit_id), u.attendee_name || null, u.identity_number || null]);
     }
 
     await conn.query(`UPDATE admission_units SET unit_status = 'Locked' WHERE unit_id IN (?)`, [unitIds]);
@@ -184,9 +191,12 @@ async function getBooking(bookingId, conn = pool) {
 
   const [items] = await conn.query(
     `SELECT bi.booking_item_id, bi.unit_id, e.event_id, e.event_name, e.event_date, c.type_name,
-            u.row_label, u.seat_number, bi.price_paid, bi.sold_at, bi.attendee_name, t.ticket_code
+            u.unit_kind, s.row_label, s.seat_number, st.zone_name,
+            bi.price_paid, bi.sold_at, bi.attendee_name, t.ticket_code
      FROM booking_items bi
      JOIN admission_units u      ON u.unit_id = bi.unit_id
+     LEFT JOIN seated_units s    ON s.unit_id = u.unit_id
+     LEFT JOIN standing_units st ON st.unit_id = u.unit_id
      JOIN event_ticket_types ett ON ett.event_ticket_type_id = u.event_ticket_type_id
      JOIN ticket_type_catalog c  ON c.type_id = ett.type_id
      JOIN events e               ON e.event_id = ett.event_id

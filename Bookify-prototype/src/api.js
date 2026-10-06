@@ -7,13 +7,14 @@ const { loadUser, requireAdmin } = require('./auth');
 const { users, organizers } = require('./routes/people');
 
 const api = express.Router();
-api.use(express.json());
+api.use(express.json({ limit: '4mb' }));   // room for a 2 MB image sent as base64
 api.use(loadUser); // sets req.user from the session cookie (or null)
 
 // Who may call what:
 //   anyone      GET events, GET promotions, register, log in
 //   logged in   book, pay and cancel your own bookings, see your own account
-//   Admin       host events (create / open / cancel / delete), create promotions,
+//   Organizer   host their own organizer's events (create / open / close / cancel)
+//   Admin       host events for any organizer, delete events, create promotions,
 //               organizers, reports, editing other users
 
 // GET /api/health — quick check that the server can reach the database
@@ -28,7 +29,7 @@ api.use('/bookings', require('./routes/bookings'));
 api.use('/promotions', require('./routes/promotions'));
 api.use('/reports', requireAdmin, require('./routes/reports'));
 api.use('/users', users);
-api.use('/organizers', requireAdmin, organizers);
+api.use('/organizers', organizers);   // each route checks its own role
 
 api.use((req, res) => res.status(404).json({ error: `No API route for ${req.method} ${req.originalUrl}` }));
 api.use(errorHandler);

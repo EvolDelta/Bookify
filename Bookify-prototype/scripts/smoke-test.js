@@ -10,11 +10,14 @@ const { pool } = require('../src/db');
 
 let base;
 let passed = 0;
+let adminToken = null;   // sent on every call once the admin has logged in
 
 async function call(method, path, body) {
+  const headers = body ? { 'content-type': 'application/json' } : {};
+  if (adminToken) headers.authorization = 'Bearer ' + adminToken;
   const res = await fetch(base + path, {
     method,
-    headers: body ? { 'content-type': 'application/json' } : {},
+    headers,
     body: body ? JSON.stringify(body) : undefined
   });
   const text = await res.text();
@@ -65,6 +68,28 @@ async function main() {
     assert.deepEqual([seat.unit_kind, seat.row_label, seat.seat_number, seat.zone_name], ['Seated', 'A', 1, null]);
     const place = r.body.units.find(u => u.unit_id === 157);
     assert.deepEqual([place.unit_kind, place.row_label, place.seat_number, place.zone_name], ['Standing', null, null, 'Back Lawn']);
+  });
+
+  console.log('\nAdmin login');
+  await check('Manage and Admin routes refuse requests without an admin login', async () => {
+    assert.equal((await call('GET', '/reports/seat-status')).status, 401);
+    assert.equal((await call('PATCH', '/organizers/3/verification', { verification_status: 'Verified' })).status, 401);
+    assert.equal((await call('PATCH', '/users/1', { full_name: 'Hacker' })).status, 401);
+    assert.equal((await call('DELETE', '/events/4')).status, 401);
+  });
+  await check('a wrong password is refused, a forged token too', async () => {
+    assert.equal((await call('POST', '/auth/login', { email: process.env.ADMIN_EMAIL, password: 'wrong' })).status, 401);
+    adminToken = 'eyJzdWIiOiJ4IiwiZXhwIjo5OTk5OTk5OTk5OTk5fQ.forged';
+    assert.equal((await call('GET', '/auth/me')).status, 401);
+    adminToken = null;
+  });
+  await check('the admin logs in (ADMIN_EMAIL / ADMIN_PASSWORD from .env)', async () => {
+    assert.ok(process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD, 'set ADMIN_EMAIL and ADMIN_PASSWORD in .env');
+    const r = await call('POST', '/auth/login', { email: process.env.ADMIN_EMAIL.toUpperCase(), password: process.env.ADMIN_PASSWORD });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    adminToken = r.body.token;
+    assert.equal((await call('GET', '/auth/me')).status, 200);
+    assert.equal((await call('GET', '/reports/seat-status')).status, 200);
   });
 
   console.log('\nBooking');
@@ -194,6 +219,32 @@ async function main() {
     assert.equal(new Set(seated.map(u => u.row_label + u.seat_number)).size, 25);
     const open = await call('PATCH', `/events/${newEvent}/status`, { event_status: 'On_sale' });
     assert.equal(open.status, 200);
+  });
+  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+  await check('event images: link at creation, then upload, serve, protect and remove', async () => {
+    const r = await call('POST', '/events', {
+      organizer_id: 1, event_name: 'Poster Night', event_date: '2030-02-02 19:00', venue_name: 'Hall', total_capacity: 5,
+      image_url: 'https://example.com/poster.jpg', ticket_types: [{ type_name: 'Normal', price: 50, zone_name: 'Floor', quantity: 5 }] });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    const id = r.body.event_id;
+    assert.equal((await call('GET', `/events/${id}`)).body.image_src, 'https://example.com/poster.jpg');
+    const up = await call('PUT', `/events/${id}/image`, { organizer_id: 1, image_data: PNG });
+    assert.match(up.body.image_src, new RegExp(`^/api/events/${id}/image\\?v=\\d+$`));
+    const file = await fetch(base.replace(/\/api$/, '') + up.body.image_src);
+    assert.equal(file.headers.get('content-type'), 'image/png');
+    assert.equal((await file.arrayBuffer()).byteLength, 68);
+    assert.equal((await call('PUT', `/events/${id}/image`, { organizer_id: 2, image_url: 'https://x.test/a.png' })).status, 403);
+    assert.equal((await call('PUT', `/events/${id}/image`, { organizer_id: 1, image_url: 'ftp://x.test/a.png' })).status, 400);
+    assert.equal((await call('PUT', `/events/${id}/image`, { organizer_id: 1, image_data: 'data:text/html;base64,PGI+' })).status, 400);
+    assert.equal((await call('PUT', `/events/${id}/image`, { organizer_id: 1 })).body.image_src, null);
+  });
+  await check('promotion images: upload at creation, then replace with a link', async () => {
+    const r = await call('POST', '/promotions', { coupon_code: 'PIC10', discount_type: 'Amount', discount_amount: 10,
+      start_date: '2026-01-01', end_date: '2030-12-31', image_data: PNG });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    assert.match(r.body.image_src, /^\/api\/promotions\/\d+\/image\?v=/);
+    const u = await call('PUT', `/promotions/${r.body.promo_id}/image`, { image_url: 'https://example.com/promo.png' });
+    assert.equal(u.body.image_src, 'https://example.com/promo.png');
   });
   await check('an all-standing event can be created', async () => {
     const r = await call('POST', '/events', {

@@ -44,7 +44,7 @@ What lives where:
 cp .env.example .env
 ```
 
-Open `.env` and set `DB_PASSWORD` to your local MySQL root password. `.env` is in `.gitignore`, so it never gets pushed to GitHub. Keep it that way: **passwords never go into Git.**
+Open `.env` and set `DB_PASSWORD` to your local MySQL root password, and `ADMIN_EMAIL` / `ADMIN_PASSWORD` to the admin login (ask a teammate for it). `.env` is in `.gitignore`, so it never gets pushed to GitHub. Keep it that way: **passwords never go into Git.**
 
 ### 3. Build the database and test it
 
@@ -87,21 +87,25 @@ curl -X POST http://localhost:3000/api/bookings/8/payments -H "content-type: app
 | Customer | `GET /api/users/:id/bookings` | "My reservations" |
 | Organizer | `POST /api/events` | Create a Draft event with seated and/or standing units (see `src/routes/events.js`) |
 | Organizer | `PATCH /api/events/:id/status` | `On_sale` / `Closed` / `Cancelled` |
+| Organizer | `PUT /api/events/:id/image` | Replace or remove the event image (`organizer_id` plus `image_url` or `image_data`; send neither to remove). Only the event's own organizer may change it |
 | Organizer | `GET/POST /api/promotions` | List or create Amount / Percent promotions |
-| Manager | `GET /api/reports/sales-last-30-days` | O1 |
-| Manager | `GET /api/reports/seat-status` | O2: which events are full |
-| Manager | `GET /api/reports/promotion-usage` | O4 |
-| Manager | `GET /api/reports/pending-bookings` | Unpaid holds and their remaining time |
-| Manager | `GET /api/reports/events/:id/revenue` | Takings split by payment method |
-| Admin | `POST /api/organizers`, `PATCH /api/organizers/:id/verification` | Register and verify organizers (BR13) |
-| Admin | `PATCH /api/users/:id` | Correct a user's details |
-| Admin | `DELETE /api/events/:id` | Remove a cancelled event that has no bookings |
+| Organizer | `PUT /api/promotions/:id/image` | Replace or remove a promotion image |
+| Anyone | `GET /api/events/:id/image`, `GET /api/promotions/:id/image` | The uploaded image file itself |
+| Admin | `POST /api/auth/login` | `email`, `password` → a token for 8 hours. Every route below marked 🔒 needs `Authorization: Bearer <token>` |
+| 🔒 Manager | `GET /api/reports/sales-last-30-days` | O1 |
+| 🔒 Manager | `GET /api/reports/seat-status` | O2: which events are full |
+| 🔒 Manager | `GET /api/reports/promotion-usage` | O4 |
+| 🔒 Manager | `GET /api/reports/pending-bookings` | Unpaid holds and their remaining time |
+| 🔒 Manager | `GET /api/reports/events/:id/revenue` | Takings split by payment method |
+| 🔒 Admin | `POST /api/organizers`, `PATCH /api/organizers/:id/verification` | Register and verify organizers (BR13) |
+| 🔒 Admin | `PATCH /api/users/:id` | Correct a user's details |
+| 🔒 Admin | `DELETE /api/events/:id` | Remove a cancelled event that has no bookings |
 
 Login is out of scope in your proposal, so the API trusts the `user_id` the client sends. A real system would get it from a login session instead.
 
 #### The website
 
-`npm run dev` and open http://localhost:3000. Everything on the page is read from and written to MySQL through the API above, and the switch at the top right moves between the four user roles in the proposal:
+`npm run dev` and open http://localhost:3000. Everything on the page is read from and written to MySQL through the API above, and the switch at the top right moves between the user roles in the proposal. Manage and Admin only appear after **Admin login** (top right) with the `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `.env`:
 
 | Role | Screens |
 |---|---|
@@ -110,7 +114,7 @@ Login is out of scope in your proposal, so the API trusts the `user_id` the clie
 | Manage (manager) | Sales in the last 30 days and takings by payment method (O1), seat status and full events (O2), promotion usage (O4), unpaid holds with live countdowns |
 | Admin | Verify organizers (BR13), correct user details, cancel and remove events |
 
-"Rules" lists BR1–BR26 and where each one shows up on the site. When the database refuses something, the page shows its message, which starts with the rule number (for example *"BR11: event needs a ticket type…"*).
+When the database refuses something, the page shows its message, which starts with the business rule number (for example *"BR11: event needs a ticket type…"*).
 
 An event has no "kind" of its own. Each ticket type describes numbered seats (`rows` + `seats_per_row`), standing places (`zone_name` + `quantity`), or both, so one event can be all seated, all standing, or a mix. Seats become `seated_units` rows and standing places become `standing_units` rows; all of them count against the same `total_capacity`. The prototype has no login or role middleware, so it cannot verify whether a request comes from the organizer, host, or an admin; a production deployment must authorize those roles before allowing event changes.
 
@@ -118,6 +122,8 @@ Example ticket type that includes both seats and standing places at the same pri
 ```json
 { "type_name": "Normal", "price": 300, "rows": ["B"], "seats_per_row": 20, "zone_name": "Lawn", "quantity": 80 }
 ```
+Events and promotions may have an image. `POST /api/events`, `POST /api/promotions` and the `PUT …/image` routes accept either `"image_url": "https://…"` (a link) or `"image_data": "data:image/jpeg;base64,…"` (an uploaded PNG, JPEG, WebP or GIF of at most 2 MB). Uploaded files are stored in MySQL (`image_data MEDIUMBLOB`) rather than on disk, because serverless hosts such as Vercel have no lasting disk. Every listing returns a ready-to-use `image_src`: the link, or `/api/events/:id/image?v=…` for an upload, where `v` changes whenever the image does so browsers never show a stale copy. The website shrinks large photos to 1600 px before uploading.
+
 `GET /api/events/:id` reports `seated_units` / `standing_units` counts, and each unit carries `unit_kind` plus either `row_label` and `seat_number` (Seated) or `zone_name` (Standing); the other fields are `null`. Bookings with more than 2 units need `attendee_name` and `identity_number` on every unit beyond the second (BR24).
 
 ---
@@ -235,7 +241,7 @@ TLS (`DB_SSL=true`) encrypts the connection. Cloud databases are reachable from 
 **Option A: Vercel** (matches your proposal)
 1. Push the project to GitHub. Check that `.env` and `ca.pem` are **not** in the commit.
 2. On vercel.com, go to **Add New → Project** and import the repo. Vercel detects Express from `server.js` (it exports `app`). Check Vercel's current Express docs if the build complains.
-3. Go to **Settings → Environment Variables** and add every `DB_*` variable. For `DB_SSL_CA`, paste the **contents** of `ca.pem`, because there's no file on Vercel. Also add `DB_POOL_SIZE=2`, since each serverless instance opens its own connections and free databases allow only a few.
+3. Go to **Settings → Environment Variables** and add every `DB_*` variable. For `DB_SSL_CA`, paste the **contents** of `ca.pem`, because there's no file on Vercel. Also add `ADMIN_EMAIL`, `ADMIN_PASSWORD` and a long random `SESSION_SECRET`, plus `DB_POOL_SIZE=2`, since each serverless instance opens its own connections and free databases allow only a few.
 4. Deploy, then open `https://<your-app>.vercel.app/api/health`. It should show `"ok": true` and the MySQL version.
 
 **Option B: Render or Railway** (a "normal" always-running server)
@@ -251,5 +257,5 @@ Create a **Web Service** from the repo, with build command `npm install` and sta
 
 ## What isn't done yet
 
-- **No role checks.** The site's Attend / Host / Manage / Admin switch is for demonstrating the four user roles from the proposal; anyone can use any of them.
+- **Customer and organizer logins.** Only the administrator logs in. Customers pick an account and organizers pick who they act as, because login is out of scope in the proposal.
 - **Login.** Out of scope, per the proposal.

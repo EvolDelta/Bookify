@@ -4,9 +4,10 @@ const express = require('express');
 const { pool } = require('./db');
 const { errorHandler } = require('./errors');
 const { users, organizers } = require('./routes/people');
+const auth = require('./auth');
 
 const api = express.Router();
-api.use(express.json());
+api.use(express.json({ limit: '4mb' }));   // room for a 2 MB image sent as base64
 
 // GET /api/health — quick check that the server can reach the database
 api.get('/health', async (req, res) => {
@@ -17,7 +18,8 @@ api.get('/health', async (req, res) => {
 api.use('/events', require('./routes/events'));
 api.use('/bookings', require('./routes/bookings'));
 api.use('/promotions', require('./routes/promotions'));
-api.use('/reports', require('./routes/reports'));
+api.use('/auth', auth.router);
+api.use('/reports', auth.requireAdmin, require('./routes/reports'));   // Manage tab
 api.use('/users', users);
 api.use('/organizers', organizers);
 

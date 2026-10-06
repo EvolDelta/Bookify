@@ -86,8 +86,13 @@ const local = {
   set(k, v) { try { v == null ? localStorage.removeItem('bookify.' + k) : localStorage.setItem('bookify.' + k, String(v)); } catch { /* storage blocked */ } }
 };
 
+// An image picker: an uploaded file (data URL) or a pasted link.
+const blankPick = () => ({ mode: 'upload', link: '', data: '', name: '' });
+const pickSrc = p => p.mode === 'link' ? p.link.trim() : p.data;
+const pickBody = p => p.mode === 'link' ? (p.link.trim() ? { image_url: p.link.trim() } : {}) : (p.data ? { image_data: p.data } : {});
+
 const blankEvent = () => ({
-  name: '', venue: '', date: '', time: '19:00', capacity: '120',
+  name: '', venue: '', date: '', time: '19:00', capacity: '120', image: blankPick(),
   types: {
     VIP:      { on: true,  price: '1200', rows: 'A',    perRow: '10', zone: '',      qty: '' },
     Priority: { on: false, price: '500',  rows: 'B, C', perRow: '10', zone: '',      qty: '' },
@@ -96,11 +101,11 @@ const blankEvent = () => ({
 });
 const blankOffer = () => {
   const end = new Date(); end.setDate(end.getDate() + 30);
-  return { type: 'Amount', value: '100', cap: '', code: '', start: ymd(new Date()), end: ymd(end) };
+  return { type: 'Amount', value: '100', cap: '', code: '', start: ymd(new Date()), end: ymd(end), image: blankPick() };
 };
 
 const state = {
-  role: 'customer', view: 'browse', oview: 'dash', mview: 'sales', aview: 'organizers', rules: false,
+  role: 'customer', view: 'browse', oview: 'dash', mview: 'sales', aview: 'organizers',
   query: '', filter: 'All', promo: 0,
   events: [], promos: [], users: [], organizers: [], allEvents: [],
   eventId: null, event: null,
@@ -109,12 +114,16 @@ const state = {
   pay: { method: 'PromptPay', amount: '', status: 'Successful' },
   mine: [], mineTab: 'Pending',
   userId: Number(local.get('user')) || null, organizerId: Number(local.get('organizer')) || null, after: null,
+  // Admin session: the signed token from /api/auth/login unlocks Manage and Admin.
+  adminToken: local.get('adminToken'), adminEmail: local.get('adminEmail'),
+  login: null,     // { email, password, touched, busy } while the admin login dialog is open
   reg: { full_name: '', email: '', phone_number: '' }, regTouched: false,
   n: blankEvent(), nTouched: false,
   g: blankOffer(), gTouched: false,
   reports: { daily: [], sales: [], seats: [], usage: [], pending: [], fetchedAt: 0 },
   revenueEvent: '', revenue: null,
   orgForm: { organizer_name: '', contact_email: '' }, editUser: null,
+  imgEdit: null,   // { kind: 'event' | 'promo', id, title, current, pick } while the image dialog is open
   now: Date.now(), toast: ''
 };
 
@@ -127,14 +136,14 @@ function setState(patch) {
 /* ─────────────────────────── talking to the API ─────────────────────────── */
 
 async function api(method, path, body) {
-  const res = await fetch('/api' + path, {
-    method,
-    headers: body ? { 'content-type': 'application/json' } : {},
-    body: body ? JSON.stringify(body) : undefined
-  });
+  const headers = body ? { 'content-type': 'application/json' } : {};
+  if (state.adminToken) headers.authorization = 'Bearer ' + state.adminToken;
+  const res = await fetch('/api' + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { /* not JSON */ }
+  // An admin token that has expired (or was signed with an old password).
+  if (res.status === 401 && state.adminToken && path !== '/auth/login') endAdminSession('Your admin session ended — log in again.');
   if (!res.ok) throw new Error((data && data.error) || `${res.status} ${res.statusText}`);
   return data;
 }
@@ -179,8 +188,11 @@ const NEEDS = {
 };
 const VIEW_KEY = { customer: 'view', organizer: 'oview', manager: 'mview', admin: 'aview' };
 
+const STAFF_ROLES = ['manager', 'admin'];
+
 function go(role, view) {
-  setState({ role, [VIEW_KEY[role]]: view, rules: false, toast: '' });
+  if (STAFF_ROLES.includes(role) && !state.adminToken) return openAdminLogin();
+  setState({ role, [VIEW_KEY[role]]: view, toast: '' });
   window.scrollTo(0, 0);
   load(...NEEDS[role][view]);
 }
@@ -433,7 +445,8 @@ async function createEvent() {
       event_date: n.date + ' ' + (n.time || '19:00'), total_capacity: Number(n.capacity),
       ticket_types: p.types.map(t => Object.assign({ type_name: t.name, price: t.price },
         t.seats ? { rows: t.rows, seats_per_row: t.perRow } : {},
-        t.standing ? { zone_name: t.zone, quantity: t.qty } : {}))
+        t.standing ? { zone_name: t.zone, quantity: t.qty } : {})),
+      ...pickBody(n.image)
     });
     setState({ n: blankEvent(), nTouched: false });
     go('organizer', 'dash');
@@ -465,7 +478,7 @@ async function publishOffer() {
   const g = state.g;
   setState({ gTouched: true });
   if (Object.keys(offerErrors(g)).length) return say('Fix the promotion fields to publish.');
-  const body = { coupon_code: g.code.trim().toUpperCase(), discount_type: g.type, start_date: g.start, end_date: g.end };
+  const body = { coupon_code: g.code.trim().toUpperCase(), discount_type: g.type, start_date: g.start, end_date: g.end, ...pickBody(g.image) };
   if (g.type === 'Amount') body.discount_amount = Number(g.value);
   else Object.assign(body, { discount_percent: Number(g.value), max_discount_cap: g.cap === '' ? undefined : Number(g.cap) });
   try {
@@ -474,6 +487,95 @@ async function publishOffer() {
     load('promos');
     say(body.coupon_code + ' is live from ' + dayLabel(g.start + 'T00:00') + ' to ' + dayLabel(g.end + 'T00:00') + '.');
   } catch (err) { fail(err); }
+}
+
+/* — admin login — */
+
+const openAdminLogin = () => setState({ login: { email: '', password: '', touched: false, busy: false } });
+
+async function adminLogin() {
+  const l = state.login;
+  setState({ login: Object.assign({}, l, { touched: true }) });
+  if (!EMAIL_RE.test(l.email.trim()) || !l.password) return;
+  setState({ login: Object.assign({}, l, { busy: true, touched: true }) });
+  try {
+    const r = await api('POST', '/auth/login', { email: l.email.trim(), password: l.password });
+    local.set('adminToken', r.token);
+    local.set('adminEmail', r.email);
+    setState({ adminToken: r.token, adminEmail: r.email, login: null });
+    go('manager', state.mview);
+    say('Logged in as admin — Manage and Admin are unlocked.');
+  } catch (err) {
+    setState({ login: Object.assign({}, state.login, { busy: false, password: '' }) });
+    fail(err);
+  }
+}
+
+function endAdminSession(message) {
+  local.set('adminToken', null);
+  local.set('adminEmail', null);
+  setState({ adminToken: null, adminEmail: null });
+  if (STAFF_ROLES.includes(state.role)) go('customer', 'browse');
+  if (message) say(message);
+}
+
+/* — images (events and promotions) — */
+
+const IMAGE_TYPES = /^image\/(png|jpeg|webp|gif)$/;
+const KEEP_AS_IS = 1.5 * 1024 * 1024;   // smaller files are sent untouched (GIFs keep their animation)
+
+// Read a chosen file as a data URL. Big photos are shrunk to 1600px JPEG so
+// they fit the 2 MB the server accepts.
+async function readImageFile(file) {
+  if (!IMAGE_TYPES.test(file.type)) throw new Error('Choose a PNG, JPEG, WebP or GIF image.');
+  const dataUrl = await new Promise((ok, no) => {
+    const r = new FileReader();
+    r.onload = () => ok(r.result);
+    r.onerror = () => no(new Error('Could not read that file.'));
+    r.readAsDataURL(file);
+  });
+  if (file.size <= KEEP_AS_IS) return dataUrl;
+  if (file.type === 'image/gif') throw new Error('GIFs must be 1.5 MB or smaller.');
+  const img = await new Promise((ok, no) => {
+    const i = new Image();
+    i.onload = () => ok(i);
+    i.onerror = () => no(new Error('That file is not a readable image.'));
+    i.src = dataUrl;
+  });
+  const scale = Math.min(1, 1600 / Math.max(img.width, img.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(img.width * scale);
+  c.height = Math.round(img.height * scale);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  const out = c.toDataURL('image/jpeg', 0.85);
+  if (out.length * 0.75 > 2 * 1024 * 1024) throw new Error('That image is still over 2 MB after shrinking — try a smaller one.');
+  return out;
+}
+
+async function onImageFile(e, update) {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  try {
+    const data = await readImageFile(file);
+    update({ data, name: file.name + ' · ' + Math.max(1, Math.round(data.length * 0.75 / 1024)) + ' KB' });
+  } catch (err) { fail(err); }
+}
+
+// Patch the picker inside a form object (state.n / state.g) or the dialog.
+const updatePick = key => patch => setState({ [key]: Object.assign({}, state[key], { [key === 'imgEdit' ? 'pick' : 'image']: Object.assign({}, state[key][key === 'imgEdit' ? 'pick' : 'image'], patch) }) });
+
+const editImage = (kind, id, title, current) => setState({ imgEdit: { kind, id, title, current, pick: blankPick() } });
+
+async function saveImage(remove) {
+  const d = state.imgEdit, body = remove ? {} : pickBody(d.pick);
+  if (!remove && !Object.keys(body).length) return say('Choose a file or paste a link first.');
+  if (d.kind === 'event') body.organizer_id = state.organizerId;
+  try {
+    await api('PUT', `/${d.kind === 'event' ? 'events' : 'promotions'}/${d.id}/image`, body);
+    setState({ imgEdit: null });
+    say(remove ? 'Image removed.' : 'Image updated — customers see it right away.');
+  } catch (err) { fail(err); }
+  load(d.kind === 'event' ? 'allEvents' : 'promos');
 }
 
 /* — administrator — */
@@ -568,7 +670,72 @@ const h1 = (title, sub) => html`<div style="display:flex;flex-direction:column;g
 const kpi = (label, value, note) => html`
 <div style="${BOX};display:flex;flex-direction:column;gap:5px"><h6 style="margin:0;color:var(--color-neutral-500)">${label}</h6><div style="font-family:var(--font-heading);font-weight:500;font-size:26px">${value}</div><div style="font-size:11.5px;color:var(--color-accent-300)">${note}</div></div>`;
 const bar = (pct, fill = 'var(--color-accent)') => html`<div style="height:5px;border-radius:3px;background:var(--color-neutral-900);overflow:hidden"><div style="height:100%;background:${fill};width:${pct}%"></div></div>`;
-const ruleTag = id => html`<span class="tag tag-outline" style="font-size:10px;padding:1px 7px">${id}</span>`;
+// A picture filling its (position:relative) parent; nothing when there is none.
+const cover = src => src ? html`<img src="${src}" alt="" loading="lazy" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover">` : '';
+const shade = src => src ? html`<div style="position:absolute;inset:0;background:linear-gradient(to top, rgba(10,11,20,.72), transparent 60%)"></div>` : '';
+const thumb = (src, w, h) => html`<div style="position:relative;width:${w}px;height:${h}px;flex:none;border-radius:var(--radius-sm);overflow:hidden;background:linear-gradient(135deg, var(--color-neutral-900), var(--color-section-ghost))">${cover(src)}</div>`;
+
+function imagePicker(p, update, label) {
+  const src = pickSrc(p);
+  return html`
+<div style="display:flex;flex-direction:column;gap:var(--space-2)">
+  <label style="font-size:12px;color:var(--color-neutral-400)">${label}</label>
+  <div class="seg" style="align-self:flex-start">
+    <button data-click="${() => update({ mode: 'upload' })}" style="${seg(p.mode === 'upload')}">Upload file</button>
+    <button data-click="${() => update({ mode: 'link' })}" style="${seg(p.mode === 'link')}">Paste link</button>
+  </div>
+  ${p.mode === 'upload'
+    ? html`<input data-key="img-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-input="${e => onImageFile(e, update)}" class="input" style="padding:5px 8px;font-size:12.5px">
+      <div style="font-size:11.5px;color:var(--color-neutral-500)">${p.name || 'PNG, JPEG, WebP or GIF · large photos are shrunk to fit 2 MB'}</div>`
+    : html`<input data-key="img-link" value="${p.link}" data-input="${e => update({ link: e.target.value })}" class="input" placeholder="https://…/poster.jpg">`}
+  ${src ? html`
+  <div style="position:relative;height:130px;border-radius:var(--radius-md);overflow:hidden;border:1px solid var(--color-neutral-800);background:var(--color-neutral-900)">
+    ${cover(src)}
+    <button data-click="${() => update({ link: '', data: '', name: '' })}" class="btn btn-secondary" style="position:absolute;right:8px;top:8px;font-size:11.5px;background:var(--color-bg)">Clear</button>
+  </div>` : ''}
+</div>`;
+}
+
+function adminLoginDialog() {
+  const l = state.login;
+  if (!l) return '';
+  const emailErr = l.touched && !EMAIL_RE.test(l.email.trim()) ? 'Enter the admin email.' : '';
+  const passErr = l.touched && !l.password ? 'Enter the password.' : '';
+  return html`
+<div data-key="logindlg" class="dialog-backdrop" style="z-index:90" data-click="${e => { if (!e.target.closest('.dialog')) setState({ login: null }); }}">
+  <div class="dialog" style="width:min(400px,100%)">
+    <div class="dialog-title">Admin login</div>
+    <div class="dialog-body">Unlocks the Manage and Admin tabs: reports, organizer verification, users and event removal.</div>
+    <div class="field"><label>Email</label><input value="${l.email}" data-input="${set('login', 'email')}" class="input" type="email" autocomplete="username" placeholder="admin@example.com" style="border-color:${bd(emailErr)}">${fieldError(emailErr)}</div>
+    <div class="field"><label>Password</label><input value="${l.password}" data-input="${set('login', 'password')}" class="input" type="password" autocomplete="current-password" style="border-color:${bd(passErr)}">${fieldError(passErr)}</div>
+    <div class="dialog-actions">
+      <button data-click="${() => setState({ login: null })}" class="btn btn-secondary">Cancel</button>
+      <button data-click="${adminLogin}" ${l.busy ? html`disabled` : ''} class="btn btn-primary">${l.busy ? 'Checking…' : 'Log in'}</button>
+    </div>
+  </div>
+</div>`;
+}
+
+function imageDialog() {
+  const d = state.imgEdit;
+  if (!d) return '';
+  const next = pickSrc(d.pick);
+  return html`
+<div data-key="imgdlg" class="dialog-backdrop" style="z-index:90" data-click="${e => { if (!e.target.closest('.dialog')) setState({ imgEdit: null }); }}">
+  <div class="dialog" style="width:min(480px,100%)">
+    <div class="dialog-title">Change image</div>
+    <div class="dialog-body">${d.title}</div>
+    ${d.current && !next ? html`<div style="display:flex;flex-direction:column;gap:var(--space-2)"><label style="font-size:12px;color:var(--color-neutral-400)">Current image</label><div style="position:relative;height:130px;border-radius:var(--radius-md);overflow:hidden;border:1px solid var(--color-neutral-800)">${cover(d.current)}</div></div>` : ''}
+    ${imagePicker(d.pick, updatePick('imgEdit'), d.current ? 'New image' : 'Image')}
+    <div class="dialog-actions">
+      ${d.current ? html`<button data-click="${() => saveImage(true)}" class="btn btn-ghost" style="margin-right:auto">Remove image</button>` : ''}
+      <button data-click="${() => setState({ imgEdit: null })}" class="btn btn-secondary">Cancel</button>
+      <button data-click="${() => saveImage(false)}" ${next ? '' : html`disabled`} class="btn btn-primary">Save image</button>
+    </div>
+  </div>
+</div>`;
+}
+
 
 function header() {
   const S = state, user = currentUser();
@@ -576,7 +743,7 @@ function header() {
   const pending = S.mine.filter(b => b.booking_status === 'Pending').length;
   const nav = (role, items) => html`
   <div style="flex:1;display:flex;align-items:center;gap:var(--space-2);min-width:0;overflow:auto">
-    ${items.map(([key, label]) => html`<button data-click="${() => go(role, key)}" style="${navBtn(!S.rules && S[VIEW_KEY[role]] === key)}">${label}</button>`)}
+    ${items.map(([key, label]) => html`<button data-click="${() => go(role, key)}" style="${navBtn(S[VIEW_KEY[role]] === key)}">${label}</button>`)}
   </div>`;
   const hold = S.role === 'customer' && S.booking && S.booking.booking_status === 'Pending';
   const left = Math.max(0, S.deadline - S.now);
@@ -585,7 +752,7 @@ function header() {
   <button data-click="${() => go('customer', 'browse')}" style="display:flex;align-items:baseline;gap:6px;border:0;background:none;cursor:pointer;padding:0;font-family:var(--font-heading);font-weight:500;font-size:17px;letter-spacing:-.02em;color:var(--color-text)">Bookify<span style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--color-accent)">${roleTag}</span></button>
   ${S.role === 'customer' ? html`
   <div style="flex:1;display:flex;align-items:center;gap:var(--space-4);min-width:0">
-    <input value="${S.query}" data-input="${e => { setState({ query: e.target.value }); if (S.view !== 'browse' || S.rules) go('customer', 'browse'); }}" placeholder="Search events, venues, organizers" class="input" style="flex:1;min-width:0;max-width:420px;font-size:13px">
+    <input value="${S.query}" data-input="${e => { setState({ query: e.target.value }); if (S.view !== 'browse') go('customer', 'browse'); }}" placeholder="Search events, venues, organizers" class="input" style="flex:1;min-width:0;max-width:420px;font-size:13px">
     <button data-click="${() => go('customer', 'browse')}" class="btn btn-ghost" style="font-size:13px">Browse</button>
     <button data-click="${() => go('customer', 'mine')}" class="btn btn-ghost" style="font-size:13px">Reservations ${pending ? html`<span class="tag tag-accent" style="margin-left:5px;font-size:10px">${pending}</span>` : ''}</button>
   </div>` : ''}
@@ -593,11 +760,13 @@ function header() {
   ${S.role === 'manager' ? nav('manager', [['sales', 'Sales'], ['seats', 'Seat status'], ['usage', 'Promotion usage'], ['holds', 'Holds']]) : ''}
   ${S.role === 'admin' ? nav('admin', [['organizers', 'Organizers'], ['users', 'Users'], ['events', 'Events']]) : ''}
   <div style="display:flex;align-items:center;gap:var(--space-3)">
-    <button data-click="${() => { setState({ rules: true }); window.scrollTo(0, 0); }}" style="${navBtn(S.rules)}">Rules</button>
     <div class="seg" style="font-size:12px">
-      ${[['customer', 'Attend'], ['organizer', 'Host'], ['manager', 'Manage'], ['admin', 'Admin']].map(([r, label]) =>
+      ${[['customer', 'Attend'], ['organizer', 'Host']].concat(S.adminToken ? [['manager', 'Manage'], ['admin', 'Admin']] : []).map(([r, label]) =>
         html`<button data-click="${() => switchRole(r)}" style="${seg(S.role === r)}">${label}</button>`)}
     </div>
+    ${S.adminToken
+      ? html`<div style="display:flex;align-items:center;gap:6px" title="Logged in as ${S.adminEmail}"><span class="tag tag-accent" style="font-size:10.5px">Admin</span><button data-click="${() => endAdminSession('Logged out of admin.')}" class="btn btn-ghost" style="font-size:12px">Log out</button></div>`
+      : html`<button data-click="${openAdminLogin}" class="btn btn-ghost" style="font-size:12px;color:var(--color-neutral-400)">Admin login</button>`}
     ${S.role === 'customer' && user ? html`<div style="display:flex;align-items:center;gap:7px" title="${user.full_name} · ${user.email}"><div style="width:26px;height:26px;border-radius:50%;background:var(--color-accent-800);color:var(--color-accent-200);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500">${user.full_name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}</div><button data-click="${() => go('customer', 'auth')}" class="btn btn-ghost" style="font-size:12px">Switch</button></div>` : ''}
     ${S.role === 'customer' && !user ? html`<button data-click="${() => go('customer', 'auth')}" class="btn btn-primary" style="font-size:13px">Sign in</button>` : ''}
   </div>
@@ -607,7 +776,7 @@ ${hold ? html`
   <div style="font-family:var(--font-heading);font-weight:500;font-size:14px;color:var(--color-accent-200);font-variant-numeric:tabular-nums">${clock(left)}</div>
   <div style="flex:1;font-size:12.5px;color:var(--color-accent-300)">Booking #${S.booking.booking_id} · ${plural(S.booking.items.length, 'unit')} locked to you — pay ${baht(remainingOf(S.booking))} before the timer ends or they go back on sale (BR17, BR18).</div>
   <div style="width:180px;height:3px;border-radius:2px;background:var(--color-accent-800);overflow:hidden"><div style="height:100%;background:var(--color-accent);width:${Math.round(left / (CONFIG.holdMinutes * 600))}%"></div></div>
-  ${S.view !== 'checkout' || S.rules ? html`<button data-click="${() => openBooking(S.booking.booking_id, 'checkout')}" class="btn btn-ghost" style="font-size:12px;color:var(--color-accent-200)">Pay now</button>` : ''}
+  ${S.view !== 'checkout' ? html`<button data-click="${() => openBooking(S.booking.booking_id, 'checkout')}" class="btn btn-ghost" style="font-size:12px;color:var(--color-accent-200)">Pay now</button>` : ''}
   <button data-click="${() => cancelBooking(S.booking.booking_id)}" class="btn btn-ghost" style="font-size:12px;color:var(--color-accent-300)">Release</button>
 </div>` : ''}`;
 }
@@ -643,7 +812,7 @@ function browseView() {
         <h2 style="font-size:28px;margin:0">No promotions running today</h2>
         <div style="font-size:13.5px;color:var(--color-neutral-400)">Organizers publish them from the Host side.</div>`}
       </div>
-      <div style="width:220px;height:130px;flex:none;border-radius:var(--radius-md);border:1px solid var(--color-neutral-800);background:linear-gradient(140deg, var(--color-section), var(--color-neutral-900));display:flex;align-items:flex-end;padding:var(--space-4);font-size:11px;color:var(--color-neutral-500)">${live.length ? (pi + 1) + ' of ' + live.length + ' promotions' : 'promotions'}</div>
+      <div style="position:relative;overflow:hidden;width:220px;height:130px;flex:none;border-radius:var(--radius-md);border:1px solid var(--color-neutral-800);background:linear-gradient(140deg, var(--color-section), var(--color-neutral-900));display:flex;align-items:flex-end;padding:var(--space-4);font-size:11px;color:var(--color-neutral-400)">${cover(po && po.image_src)}${shade(po && po.image_src)}<span style="position:relative">${live.length ? (pi + 1) + ' of ' + live.length + ' promotions' : 'promotions'}</span></div>
     </div>
     <button data-click="${step(1)}" class="btn btn-icon lift" style="align-self:center;border:1px solid var(--color-neutral-800)">›</button>
   </div>
@@ -659,9 +828,10 @@ function browseView() {
   <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:var(--space-6)">
     ${list.map(e => html`
     <button data-click="${() => openEvent(e.event_id)}" class="card lift" style="text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:var(--space-3);padding:0;overflow:hidden;border:1px solid var(--color-neutral-800)">
-      <div style="height:120px;background:linear-gradient(135deg, var(--color-neutral-900), var(--color-section-ghost));display:flex;align-items:flex-end;justify-content:space-between;padding:var(--space-3) var(--space-4);gap:8px">
-        <span style="font-size:10.5px;color:var(--color-neutral-400)">${kindLabel(e)}</span>
-        ${e.is_full ? html`<span class="tag tag-neutral" style="font-size:10px">Sold out</span>` : ''}
+      <div style="position:relative;overflow:hidden;height:120px;background:linear-gradient(135deg, var(--color-neutral-900), var(--color-section-ghost));display:flex;align-items:flex-end;justify-content:space-between;padding:var(--space-3) var(--space-4);gap:8px">
+        ${cover(e.image_src)}${shade(e.image_src)}
+        <span style="position:relative;font-size:10.5px;color:var(--color-neutral-300)">${kindLabel(e)}</span>
+        ${e.is_full ? html`<span class="tag tag-neutral" style="position:relative;font-size:10px">Sold out</span>` : ''}
       </div>
       <div style="padding:0 var(--space-6) var(--space-6);display:flex;flex-direction:column;gap:var(--space-2)">
         <div class="card-kicker" style="font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-neutral-500)">${whenLabel(e.event_date)}</div>
@@ -687,7 +857,7 @@ function eventView() {
   return html`
 <div class="pane" data-key="event" style="display:flex;flex-direction:column;gap:var(--space-6)">
   <button data-click="${() => go('customer', 'browse')}" class="btn btn-ghost" style="align-self:flex-start;font-size:12.5px">← All events</button>
-  <div style="height:220px;border-radius:var(--radius-lg);border:1px solid var(--color-neutral-800);background:linear-gradient(120deg, var(--color-section), var(--color-neutral-900) 70%);display:flex;align-items:flex-end;padding:var(--space-6);font-size:11px;color:var(--color-neutral-500)">${ev.venue_name}</div>
+  <div style="position:relative;overflow:hidden;height:${ev.image_src ? 300 : 220}px;border-radius:var(--radius-lg);border:1px solid var(--color-neutral-800);background:linear-gradient(120deg, var(--color-section), var(--color-neutral-900) 70%);display:flex;align-items:flex-end;padding:var(--space-6);font-size:11px;color:var(--color-neutral-400)">${cover(ev.image_src)}${shade(ev.image_src)}<span style="position:relative">${ev.venue_name}</span></div>
   <div style="display:flex;flex-wrap:wrap;gap:var(--space-8);align-items:flex-start">
     <div style="flex:1;min-width:300px;display:flex;flex-direction:column;gap:var(--space-6)">
       <div style="display:flex;flex-direction:column;gap:var(--space-3)">
@@ -921,7 +1091,7 @@ function mineView() {
   ${!list.length ? html`<div style="${EMPTY}">Nothing here. <button data-click="${() => go('customer', 'browse')}" class="btn btn-ghost" style="font-size:13px">Find an event</button></div>` : ''}
   ${list.map(b => html`
   <div style="display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-4);${BOX}">
-    <div style="width:72px;height:56px;flex:none;border-radius:var(--radius-sm);background:linear-gradient(135deg, var(--color-neutral-900), var(--color-section-ghost))"></div>
+    ${thumb(b.image_src, 72, 56)}
     <div style="flex:1;min-width:180px"><div style="font-family:var(--font-heading);font-weight:500;font-size:14.5px">${b.event_name}</div><div style="font-size:12px;color:var(--color-neutral-400)">${whenLabel(b.event_date)} · ${b.venue_name}</div><div style="font-size:11.5px;color:var(--color-neutral-500)">${b.units} · booking #${b.booking_id} · made ${whenLabel(b.created_at)}</div></div>
     ${statusPill(b.booking_status)}
     <div style="font-family:var(--font-heading);font-weight:500;font-size:14px">${baht(b.total_amount)}</div>
@@ -991,16 +1161,20 @@ function dashView() {
       ${mine.map(e => {
         const pct = e.units ? Math.round(e.sold / e.units * 100) : 0;
         return html`
-      <div style="display:flex;flex-direction:column;gap:var(--space-3);${BOX}">
+      <div style="display:flex;gap:var(--space-4);${BOX}">
+        ${thumb(e.image_src, 96, 96)}
+        <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:var(--space-3)">
         <div style="display:flex;align-items:baseline;gap:var(--space-3);flex-wrap:wrap"><div style="font-family:var(--font-heading);font-weight:500;font-size:15px">${e.event_name}</div>${statusPill(e.event_status)}<div style="margin-left:auto;font-size:12px;color:var(--color-neutral-500)">${whenLabel(e.event_date)}</div></div>
         <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--color-neutral-400)"><span>${e.sold} of ${e.units} units sold · ${e.locked} on hold</span><span>${pct}%</span></div>
         ${bar(pct)}
         <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;align-items:center">
           <div style="font-size:11.5px;color:var(--color-neutral-500)">${e.seated_units} seated · ${e.standing_units} standing · capacity ${e.total_capacity}</div>
-          <button data-click="${() => openEvent(e.event_id)}" class="btn btn-ghost" style="font-size:12px;margin-left:auto">Preview</button>
+          <button data-click="${() => editImage('event', e.event_id, e.event_name, e.image_src)}" class="btn btn-ghost" style="font-size:12px;margin-left:auto">${e.image_src ? 'Change image' : 'Add image'}</button>
+          <button data-click="${() => openEvent(e.event_id)}" class="btn btn-ghost" style="font-size:12px">Preview</button>
           ${e.event_status === 'Draft' || e.event_status === 'Closed' ? html`<button data-click="${() => setEventStatus(e.event_id, 'On_sale')}" class="btn btn-primary" style="font-size:12px">Open for sale</button>` : ''}
           ${e.event_status === 'On_sale' ? html`<button data-click="${() => setEventStatus(e.event_id, 'Closed')}" class="btn btn-secondary" style="font-size:12px">Close sales</button>` : ''}
           ${e.event_status !== 'Cancelled' ? html`<button data-click="${() => setEventStatus(e.event_id, 'Cancelled')}" class="btn btn-secondary" style="font-size:12px">Cancel</button>` : ''}
+        </div>
         </div>
       </div>`;
       })}
@@ -1009,6 +1183,7 @@ function dashView() {
       <h4 style="font-size:16px;margin:0">Promotions</h4>
       ${S.promos.map(p => html`
       <div style="display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3) var(--space-4);border:1px dashed var(--color-neutral-800);border-radius:var(--radius-sm)">
+        <button data-click="${() => editImage('promo', p.promo_id, p.coupon_code + ' · ' + promoLabel(p), p.image_src)}" title="${p.image_src ? 'Change image' : 'Add image'}" style="border:0;padding:0;background:none;cursor:pointer">${thumb(p.image_src, 36, 36)}</button>
         <div style="flex:1;min-width:0"><div style="${MONO};font-size:12.5px">${p.coupon_code}</div><div style="font-size:11px;color:var(--color-neutral-500)">${promoLabel(p)} · ${dayLabel(p.start_date)} – ${dayLabel(p.end_date)}</div></div>
         <div style="font-size:11.5px;color:${p.active_today ? 'var(--color-accent-300)' : 'var(--color-neutral-600)'}">${p.active_today ? 'live' : 'off'} · ${p.times_used}</div>
       </div>`)}
@@ -1032,6 +1207,7 @@ function createView() {
   <div style="display:flex;flex-wrap:wrap;gap:var(--space-8);align-items:flex-start">
     <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:var(--space-4)">
       ${field('Event name', n.name, set('n', 'name'), { placeholder: 'SE Night Concert 2026', error: e.name })}
+      ${imagePicker(n.image, updatePick('n'), 'Event image (optional) — shown on the event card and page')}
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:var(--space-4)">
         ${field('Venue', n.venue, set('n', 'venue'), { placeholder: 'Main Hall, Building 30', error: e.venue })}
         ${field('Date', n.date, set('n', 'date'), { type: 'date', min: ymd(new Date()), error: e.date })}
@@ -1060,6 +1236,11 @@ function createView() {
       <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;padding-top:var(--space-2)"><button data-click="${createEvent}" ${!org || org.verification_status !== 'Verified' ? html`disabled` : ''} class="btn btn-primary">Create draft</button><button data-click="${() => setState({ n: blankEvent(), nTouched: false })}" class="btn btn-ghost">Reset form</button></div>
     </div>
     <div style="width:320px;flex:none;display:flex;flex-direction:column;gap:var(--space-4)">
+      <h6 style="margin:0;color:var(--color-neutral-500)">Preview — browse card</h6>
+      <div style="border:1px solid var(--color-neutral-800);border-radius:var(--radius-md);background:var(--color-surface);overflow:hidden">
+        <div style="position:relative;height:110px;background:linear-gradient(135deg, var(--color-neutral-900), var(--color-section-ghost))">${cover(pickSrc(n.image))}</div>
+        <div style="padding:var(--space-4) var(--space-6);display:flex;flex-direction:column;gap:4px"><h6 style="margin:0;color:var(--color-neutral-500)">${n.date ? whenLabel(n.date + 'T' + (n.time || '19:00')) : 'date not set'}</h6><div style="font-family:var(--font-heading);font-weight:500;font-size:15px">${n.name.trim() || 'Untitled event'}</div><div style="font-size:12px;color:var(--color-neutral-400)">${n.venue.trim() || 'Venue not set'}</div></div>
+      </div>
       <h6 style="margin:0;color:var(--color-neutral-500)">Units this creates</h6>
       <div style="${BOX};display:flex;flex-direction:column;gap:var(--space-3)">
         <div style="display:flex;justify-content:space-between;font-size:12.5px;color:var(--color-neutral-400)"><span>Seated_Units</span><span>${p.seated}</span></div>
@@ -1105,9 +1286,15 @@ function offerView() {
         ${field('Start date', g.start, set('g', 'start'), { type: 'date' })}
         ${field('End date', g.end, set('g', 'end'), { type: 'date', error: e.end })}
       </div>
+      ${imagePicker(g.image, updatePick('g'), 'Promotion image (optional) — shown in the home carousel')}
       <div style="display:flex;gap:var(--space-3);flex-wrap:wrap"><button data-click="${publishOffer}" class="btn btn-primary">Publish promotion</button><button data-click="${() => go('organizer', 'dash')}" class="btn btn-ghost">Cancel</button></div>
     </div>
     <div style="width:330px;flex:none;display:flex;flex-direction:column;gap:var(--space-4)">
+      <h6 style="margin:0;color:var(--color-neutral-500)">Preview — carousel slide</h6>
+      <div style="display:flex;gap:var(--space-4);align-items:center;padding:var(--space-4);border:1px solid var(--color-accent-800);border-radius:var(--radius-md);background:linear-gradient(120deg, var(--color-accent-900), var(--color-surface))">
+        <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:4px"><span class="tag tag-accent" style="align-self:flex-start;font-size:9.5px;letter-spacing:.1em;text-transform:uppercase">${g.type} discount</span><div style="font-family:var(--font-heading);font-weight:500;font-size:14px">${g.type === 'Amount' ? baht(v) + ' off' : v + '% off'} with ${g.code.trim().toUpperCase() || 'CODE'}</div></div>
+        ${thumb(pickSrc(g.image), 96, 64)}
+      </div>
       <h6 style="margin:0;color:var(--color-neutral-500)">Preview — a ${baht(base)} booking</h6>
       <div style="padding:var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-md);background:var(--color-surface);display:flex;flex-direction:column;gap:5px;font-size:12.5px">
         <div style="display:flex;justify-content:space-between;color:var(--color-neutral-400)"><span>Tickets</span><span>${baht(base)}</span></div>
@@ -1120,8 +1307,8 @@ function offerView() {
   <div style="display:flex;flex-direction:column;gap:var(--space-4)">
     <h4 style="font-size:16px;margin:0">All promotions</h4>
     <table class="table">
-      <thead><tr><th>Code</th><th>Type</th><th>Discount</th><th>Valid</th><th>Today</th><th>Used</th></tr></thead>
-      <tbody>${S.promos.map(p => html`<tr><td style="${MONO}">${p.coupon_code}</td><td>${p.discount_type}</td><td>${promoLabel(p)}</td><td>${dayLabel(p.start_date)} – ${dayLabel(p.end_date)}</td><td>${p.active_today ? html`<span style="${pill('ok')}">Valid</span>` : html`<span style="${pill('quiet')}">Not valid</span>`}</td><td>${p.times_used}</td></tr>`)}</tbody>
+      <thead><tr><th>Image</th><th>Code</th><th>Type</th><th>Discount</th><th>Valid</th><th>Today</th><th>Used</th></tr></thead>
+      <tbody>${S.promos.map(p => html`<tr><td><button data-click="${() => editImage('promo', p.promo_id, p.coupon_code + ' · ' + promoLabel(p), p.image_src)}" class="btn btn-ghost" style="font-size:12px;gap:8px">${thumb(p.image_src, 40, 28)}${p.image_src ? 'Change' : 'Add'}</button></td><td style="${MONO}">${p.coupon_code}</td><td>${p.discount_type}</td><td>${promoLabel(p)}</td><td>${dayLabel(p.start_date)} – ${dayLabel(p.end_date)}</td><td>${p.active_today ? html`<span style="${pill('ok')}">Valid</span>` : html`<span style="${pill('quiet')}">Not valid</span>`}</td><td>${p.times_used}</td></tr>`)}</tbody>
     </table>
   </div>
 </div>`;
@@ -1278,48 +1465,6 @@ function adminEventsView() {
 </div>`;
 }
 
-/* — business rules — */
-
-const RULES = [
-  ['BR1', 'Relationship', 'An Organizer may create many Events; each Event has exactly one Organizer.', 'Host → Dashboard lists the acting organizer’s events.'],
-  ['BR2', 'Relationship', 'Events offer catalog ticket types (Normal / Priority / VIP) through Event_Ticket_Types.', 'Event page “Ticket types”; Host → Create event.'],
-  ['BR3', 'Relationship', 'Each Admission_Unit is priced by exactly one Event_Ticket_Type.', 'Seat tooltips and standing zones show the type and price.'],
-  ['BR4', 'Relationship', 'A User makes many Bookings; each Booking has exactly one User.', 'Sign in to pick the user; Reservations lists theirs.'],
-  ['BR5', 'Relationship', 'Bookings hold Admission_Units through Booking_items.', 'Checkout lists each unit in the booking.'],
-  ['BR6', 'Relationship', 'A Booking may have many Payments; each Payment settles one Booking.', 'Checkout → “Payments on this booking”.'],
-  ['BR7', 'Relationship', 'Each Booking_item produces at most one Ticket.', 'Confirmation shows one ticket code per unit.'],
-  ['BR8', 'Relationship', 'A Booking applies at most one Promotion.', 'One promotion code field per reservation.'],
-  ['BR9', 'Participation', 'Every Booking has at least one Booking_item.', 'Reserve is disabled until something is picked.'],
-  ['BR10', 'Participation', 'Every Admission_Unit is a Seated_Unit or a Standing_Unit.', 'Seat map rows vs. standing zones.'],
-  ['BR11', 'Participation', 'An Event needs a ticket type and units before it goes on sale.', 'Host → “Open for sale” is refused otherwise.'],
-  ['BR12', 'Participation', 'Tickets are issued only for paid Bookings.', 'Ticket codes appear only after payment completes.'],
-  ['BR13', 'Constraint', 'Only a verified Organizer may create Events.', 'Admin → Organizers verifies; Host → Create is blocked until then.'],
-  ['BR14', 'Constraint', 'Status and type columns only take their allowed values.', 'Status pills everywhere; payment methods and results.'],
-  ['BR15', 'Constraint', 'User email, catalog type name and ticket code are unique; a type appears once per event.', 'Register / Admin → Users refuse a used email.'],
-  ['BR16', 'Constraint', 'A seat’s row + number is unique in its Event; a standing place has a zone instead.', 'Create event refuses a repeated row.'],
-  ['BR17', 'Constraint', 'A Booking locks its units for 5 minutes from creation.', 'The hold bar countdown after Reserve.'],
-  ['BR18', 'Constraint', 'Unpaid Bookings expire and free their units; paid ones make them Sold.', 'Let the timer run out — the units return to Available.'],
-  ['BR19', 'Constraint', 'A Booking is Paid when its Successful Payments cover the total.', 'Pay part of it, or record a Failed payment.'],
-  ['BR20', 'Constraint', 'A unit can be sold once and only once.', 'Sold seats can’t be picked; two buyers racing get one winner.'],
-  ['BR21', 'Constraint', 'Prices are above zero; the price paid and the discount are fixed at sale.', 'Price paid shown per ticket; Manager → Sales.'],
-  ['BR22', 'Constraint', 'Units never exceed capacity; a promotion works only inside its dates.', 'Create event capacity bar; expired codes are refused.'],
-  ['BR23', 'Constraint', 'An Event is dated after it was created, and can’t be booked once it has happened.', 'Create event refuses past dates.'],
-  ['BR24', 'Constraint', 'Tickets after the 2nd need an attendee name and ID; one ID per Event.', 'Seat picker asks for ID from the 3rd ticket.'],
-  ['BR25', 'Specialisation', 'Admission_Unit is Seated or Standing — disjoint and total.', 'Event page “Where you can be”; Host → units preview.'],
-  ['BR26', 'Specialisation', 'Promotion is Amount or Percent — disjoint and total.', 'Host → Promotions discount type.']
-];
-
-function rulesView() {
-  return html`
-<div class="pane" data-key="rules" style="display:flex;flex-direction:column;gap:var(--space-6)">
-  ${h1('Business rules', 'The 26 rules from the proposal. MySQL enforces every one of them (schema.sql, triggers.sql, the booking transactions). This page shows where each one appears in Bookify.')}
-  <table class="table">
-    <thead><tr><th>#</th><th>Category</th><th>Rule</th><th>Where you see it</th></tr></thead>
-    <tbody>${RULES.map(([id, cat, rule, where]) => html`<tr><td>${ruleTag(id)}</td><td style="font-size:12px;color:var(--color-neutral-400);white-space:nowrap">${cat}</td><td>${rule}</td><td style="font-size:12.5px;color:var(--color-neutral-400)">${where}</td></tr>`)}</tbody>
-  </table>
-</div>`;
-}
-
 function page() {
   const S = state;
   const views = {
@@ -1328,13 +1473,15 @@ function page() {
     manager: { sales: salesView, seats: seatStatusView, usage: usageView, holds: holdsView },
     admin: { organizers: adminOrganizersView, users: adminUsersView, events: adminEventsView }
   };
-  const body = S.rules ? rulesView() : views[S.role][S[VIEW_KEY[S.role]]]();
+  const body = views[S.role][S[VIEW_KEY[S.role]]]();
   return html`
 <div style="min-height:100vh;background:radial-gradient(120% 80% at 12% -10%, color-mix(in srgb, var(--color-accent) 9%, transparent), transparent 60%), var(--color-bg)">
   ${header()}
   <div data-key="main" style="max-width:1120px;margin:0 auto;padding:var(--space-8) var(--space-8) 64px">
     ${body}
   </div>
+  ${imageDialog()}
+  ${adminLoginDialog()}
   ${S.toast ? html`<div data-key="toast" style="position:fixed;left:50%;bottom:28px;z-index:80;animation:toastIn .2s ease both;display:flex;align-items:center;gap:var(--space-3);padding:var(--space-4) var(--space-6);border:1px solid var(--color-accent-700);border-radius:var(--radius-md);background:var(--color-accent-900);box-shadow:var(--shadow-lg);font-size:13px;color:var(--color-accent-100);max-width:min(460px,88vw)">${S.toast}</div>` : ''}
 </div>`;
 }
@@ -1357,6 +1504,9 @@ function render() {
 root.addEventListener('click', e => {
   const el = e.target.closest('[data-click]');
   if (el && !el.disabled) handlers[el.dataset.click](e);
+});
+root.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && state.login && e.target.closest('[data-key="logindlg"]')) adminLogin();
 });
 root.addEventListener('input', e => {
   const el = e.target.closest('[data-input]');
@@ -1384,17 +1534,18 @@ setInterval(() => {
 
 // Keep open seat maps and hold lists in step with other buyers.
 setInterval(() => {
-  if (document.hidden || state.rules) return;
+  if (document.hidden) return;
   if (state.role === 'customer' && (state.view === 'seats' || state.view === 'event')) loaders.event().catch(() => {});
   if (state.role === 'manager' && state.mview === 'holds') loaders.pending().catch(() => {});
 }, CONFIG.refreshMs);
 
 setInterval(() => {
-  if (CONFIG.promoAutoRotate && state.role === 'customer' && state.view === 'browse' && !state.rules) {
+  if (CONFIG.promoAutoRotate && state.role === 'customer' && state.view === 'browse') {
     setState(s => ({ promo: (s.promo + 1) % Math.max(1, s.promos.filter(p => p.active_today).length) }));
   }
 }, 6000);
 
 render();
 go('customer', 'browse');
+if (state.adminToken) get('/auth/me').catch(() => endAdminSession(null));
 load('users', 'mine').then(resumePendingHold);

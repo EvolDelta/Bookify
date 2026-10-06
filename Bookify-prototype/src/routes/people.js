@@ -5,6 +5,8 @@ const v = require('../validate');
 const { HttpError } = require('../errors');
 const { pool } = require('../db');
 const { expireStaleBookings } = require('../services/bookings');
+const { imageSrc } = require('../images');
+const { requireAdmin } = require('../auth');
 
 const users = express.Router();
 const organizers = express.Router();
@@ -33,8 +35,8 @@ users.get('/:id', async (req, res) => {
   res.json(u);
 });
 
-// PATCH /api/users/:id — administrator corrects a user's details
-users.patch('/:id', async (req, res) => {
+// PATCH /api/users/:id — administrator corrects a user's details (admin login required)
+users.patch('/:id', requireAdmin, async (req, res) => {
   const id = v.id(req.params.id, 'id');
   const changes = {};
   if (req.body.full_name !== undefined) changes.full_name = v.text(req.body.full_name, 'full_name', { max: 100 });
@@ -51,7 +53,7 @@ users.get('/:id/bookings', async (req, res) => {
   await expireStaleBookings();
   const [rows] = await pool.query(
     `SELECT b.booking_id, b.booking_status, b.created_at, b.lock_expires_at, b.total_amount,
-            e.event_id, e.event_name, e.event_date, e.venue_name,
+            e.event_id, e.event_name, e.event_date, e.venue_name, ${imageSrc('e', 'events', 'event_id')},
             GROUP_CONCAT(COALESCE(CONCAT(s.row_label, s.seat_number), st.zone_name)
                          ORDER BY u.unit_id SEPARATOR ', ') AS units
      FROM bookings b
@@ -73,8 +75,8 @@ organizers.get('/', async (req, res) => {
   res.json(rows);
 });
 
-// POST /api/organizers  { "organizer_name", "contact_email" } — starts as Pending
-organizers.post('/', async (req, res) => {
+// POST /api/organizers  { "organizer_name", "contact_email" } — starts as Pending. Admin only.
+organizers.post('/', requireAdmin, async (req, res) => {
   const o = {
     organizer_name: v.text(req.body.organizer_name, 'organizer_name', { max: 100 }),
     contact_email: v.email(req.body.contact_email, 'contact_email')
@@ -84,8 +86,8 @@ organizers.post('/', async (req, res) => {
 });
 
 // PATCH /api/organizers/:id/verification  { "verification_status": "Verified" | "Rejected" | "Pending" }
-// Administrator task. Needed before the organizer can create events (BR13).
-organizers.patch('/:id/verification', async (req, res) => {
+// Admin only. Needed before the organizer can create events (BR13).
+organizers.patch('/:id/verification', requireAdmin, async (req, res) => {
   const id = v.id(req.params.id, 'id');
   const status = v.oneOf(req.body.verification_status, 'verification_status', ['Pending', 'Verified', 'Rejected']);
   const [r] = await pool.query(

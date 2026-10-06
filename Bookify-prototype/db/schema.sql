@@ -52,6 +52,13 @@ CREATE TABLE events (
   total_capacity  INT NOT NULL,
   event_status    ENUM('Draft','On_sale','Closed','Cancelled') NOT NULL DEFAULT 'Draft',  -- BR14
   created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  -- Optional picture: a link OR an uploaded file stored here, never both.
+  image_url         VARCHAR(2048) NULL,
+  image_data        MEDIUMBLOB NULL,
+  image_mime        VARCHAR(20) NULL,
+  image_updated_at  DATETIME NULL,
+  CONSTRAINT ck_events_image_one CHECK (image_url IS NULL OR image_data IS NULL),
+  CONSTRAINT ck_events_image_mime CHECK ((image_data IS NULL) = (image_mime IS NULL)),
   CONSTRAINT fk_events_organizer FOREIGN KEY (organizer_id) REFERENCES organizers (organizer_id),
   CONSTRAINT ck_events_capacity CHECK (total_capacity > 0),
   CONSTRAINT ck_events_future CHECK (event_date > created_at)                   -- BR23
@@ -125,6 +132,13 @@ CREATE TABLE promotions (
   discount_type  ENUM('Amount','Percent') NOT NULL,                             -- discriminator, BR26
   start_date     DATE NOT NULL,
   end_date       DATE NOT NULL,
+  -- Optional picture: a link OR an uploaded file stored here, never both.
+  image_url         VARCHAR(2048) NULL,
+  image_data        MEDIUMBLOB NULL,
+  image_mime        VARCHAR(20) NULL,
+  image_updated_at  DATETIME NULL,
+  CONSTRAINT ck_promotions_image_one CHECK (image_url IS NULL OR image_data IS NULL),
+  CONSTRAINT ck_promotions_image_mime CHECK ((image_data IS NULL) = (image_mime IS NULL)),
   CONSTRAINT uq_promotions_code UNIQUE (coupon_code),
   CONSTRAINT ck_promotions_period CHECK (end_date >= start_date),
   CONSTRAINT uq_promotions_id_type UNIQUE (promo_id, discount_type)

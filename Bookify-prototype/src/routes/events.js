@@ -4,12 +4,14 @@ const v = require('../validate');
 const { HttpError } = require('../errors');
 const { pool, transaction } = require('../db');
 const { expireStaleBookings } = require('../services/bookings');
+const { parseImage, imageSrc, sendImage } = require('../images');
+const { requireAdmin } = require('../auth');
 
 const router = express.Router();
 
 const AVAILABILITY = `
   SELECT e.event_id, e.event_name, e.event_date, e.venue_name, e.total_capacity, e.event_status,
-         e.organizer_id, o.organizer_name,
+         e.organizer_id, o.organizer_name, ${imageSrc('e', 'events', 'event_id')},
          MIN(ett.price) AS price_from,
          COUNT(u.unit_id) AS units,
          COALESCE(SUM(u.unit_kind = 'Seated'), 0)   AS seated_units,
@@ -70,7 +72,8 @@ router.get('/:id', async (req, res) => {
 //     { "type_name": "VIP",    "price": 1200, "rows": ["A"], "seats_per_row": 10 },
 //     { "type_name": "Normal", "price": 300,  "rows": ["B", "C"], "seats_per_row": 10,
 //       "zone_name": "Back Lawn", "quantity": 80 },
-//     { "type_name": "Priority", "price": 500, "zone_name": "Front Pit", "quantity": 40 } ] }
+//     { "type_name": "Priority", "price": 500, "zone_name": "Front Pit", "quantity": 40 } ],
+//     "image_url": "https://..."  or  "image_data": "data:image/jpeg;base64,..."  (optional) }
 // Seats become Seated_Units, standing places become Standing_Units (BR25), so an
 // event may be all seated, all standing, or a mix.
 router.post('/', async (req, res) => {
@@ -82,6 +85,8 @@ router.post('/', async (req, res) => {
     venue_name: v.text(b.venue_name, 'venue_name', { max: 150 }),
     total_capacity: v.id(b.total_capacity, 'total_capacity')
   };
+  const image = parseImage(b);
+  if (image.image_url || image.image_data) Object.assign(e, image, { image_updated_at: new Date() });
   const types = Array.isArray(b.ticket_types) ? b.ticket_types : [];
   if (!types.length) throw new HttpError(400, 'BR11: ticket_types needs at least one entry.');
   const typeNames = new Set();
@@ -156,6 +161,27 @@ router.post('/', async (req, res) => {
     next: `PATCH /api/events/${eventId}/status {"event_status":"On_sale"} to open it for booking` });
 });
 
+// GET /api/events/:id/image — an uploaded event image (links are used directly)
+router.get('/:id/image', async (req, res) => {
+  const [[row]] = await pool.query('SELECT image_data, image_mime FROM events WHERE event_id = ?', [v.id(req.params.id, 'id')]);
+  sendImage(res, row);
+});
+
+// PUT /api/events/:id/image — the organizer replaces or removes the image.
+// { "organizer_id": 1, "image_url": "https://..." | "image_data": "data:..." }
+// Send neither image field to remove it.
+router.put('/:id/image', async (req, res) => {
+  const id = v.id(req.params.id, 'id');
+  const organizerId = v.id(req.body.organizer_id, 'organizer_id');
+  const image = parseImage(req.body);
+  const [[ev]] = await pool.query('SELECT organizer_id FROM events WHERE event_id = ?', [id]);
+  if (!ev) throw new HttpError(404, 'Event not found.');
+  if (ev.organizer_id !== organizerId) throw new HttpError(403, 'BR1: only the organizer who created this event can change its image.');
+  await pool.query('UPDATE events SET ?, image_updated_at = NOW() WHERE event_id = ?', [image, id]);
+  const [[row]] = await pool.query(`SELECT ${imageSrc('e', 'events', 'event_id')} FROM events e WHERE e.event_id = ?`, [id]);
+  res.json({ event_id: id, image_src: row.image_src });
+});
+
 // PATCH /api/events/:id/status  { "event_status": "On_sale" | "Closed" | "Cancelled" }
 // Opening for sale runs the BR11/BR25 checks in trg_events_bu.
 router.patch('/:id/status', async (req, res) => {
@@ -166,9 +192,9 @@ router.patch('/:id/status', async (req, res) => {
   res.json({ event_id: id, event_status: status });
 });
 
-// DELETE /api/events/:id — administrator removes a cancelled event that nobody booked.
+// DELETE /api/events/:id — administrator (admin login required) removes a cancelled event that nobody booked.
 // Events with bookings are kept so sales history still adds up.
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requireAdmin, async (req, res) => {
   const id = v.id(req.params.id, 'id');
   await transaction(async conn => {
     const [[ev]] = await conn.query('SELECT event_status FROM events WHERE event_id = ? FOR UPDATE', [id]);

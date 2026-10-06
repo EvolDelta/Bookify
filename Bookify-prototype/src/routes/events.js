@@ -29,6 +29,7 @@ const AVAILABILITY_GROUP = ` GROUP BY e.event_id, o.organizer_name`;
 router.get('/', async (req, res) => {
   await expireStaleBookings();
   const status = v.oneOf(req.query.status, 'status', ['Draft', 'On_sale', 'Closed', 'Cancelled', 'all'], 'On_sale');
+  if (status !== 'On_sale' && (!req.user || req.user.role !== 'Admin')) throw new HttpError(403, 'Only admins can list events that are not on sale.');
   const where = status === 'all' ? '' : ' WHERE e.event_status = ?';
   const [rows] = await pool.query(AVAILABILITY + where + AVAILABILITY_GROUP + ' ORDER BY e.event_date', [status]);
   res.json(rows.map(r => ({ ...r, is_full: r.units > 0 && r.sold === r.units })));
@@ -66,7 +67,7 @@ router.get('/:id', async (req, res) => {
   res.json({ ...event, ticket_types: ticketTypes, units });
 });
 
-// POST /api/events — an organizer creates a Draft event with its admission units.
+// POST /api/events — an admin hosts a new Draft event (with its admission units) for an organizer.
 // Each ticket type describes numbered seats, standing places, or both:
 //   { ..., "ticket_types": [
 //     { "type_name": "VIP",    "price": 1200, "rows": ["A"], "seats_per_row": 10 },
@@ -76,7 +77,7 @@ router.get('/:id', async (req, res) => {
 //     "image_url": "https://..."  or  "image_data": "data:image/jpeg;base64,..."  (optional) }
 // Seats become Seated_Units, standing places become Standing_Units (BR25), so an
 // event may be all seated, all standing, or a mix.
-router.post('/', async (req, res) => {
+router.post('/', requireAdmin, async (req, res) => {
   const b = req.body;
   const e = {
     organizer_id: v.id(b.organizer_id, 'organizer_id'),
@@ -167,10 +168,10 @@ router.get('/:id/image', async (req, res) => {
   sendImage(res, row);
 });
 
-// PUT /api/events/:id/image — the organizer replaces or removes the image.
+// PUT /api/events/:id/image — an admin replaces or removes the image for the organizer.
 // { "organizer_id": 1, "image_url": "https://..." | "image_data": "data:..." }
 // Send neither image field to remove it.
-router.put('/:id/image', async (req, res) => {
+router.put('/:id/image', requireAdmin, async (req, res) => {
   const id = v.id(req.params.id, 'id');
   const organizerId = v.id(req.body.organizer_id, 'organizer_id');
   const image = parseImage(req.body);
@@ -184,7 +185,7 @@ router.put('/:id/image', async (req, res) => {
 
 // PATCH /api/events/:id/status  { "event_status": "On_sale" | "Closed" | "Cancelled" }
 // Opening for sale runs the BR11/BR25 checks in trg_events_bu.
-router.patch('/:id/status', async (req, res) => {
+router.patch('/:id/status', requireAdmin, async (req, res) => {
   const id = v.id(req.params.id, 'id');
   const status = v.oneOf(req.body.event_status, 'event_status', ['Draft', 'On_sale', 'Closed', 'Cancelled']);
   const [r] = await pool.query('UPDATE events SET event_status = ? WHERE event_id = ?', [status, id]);

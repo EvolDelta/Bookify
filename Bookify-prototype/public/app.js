@@ -113,11 +113,11 @@ const state = {
   booking: null, deadline: 0, expiring: false, busy: false,
   pay: { method: 'PromptPay', amount: '', status: 'Successful' },
   mine: [], mineTab: 'Pending',
-  userId: Number(local.get('user')) || null, organizerId: Number(local.get('organizer')) || null, after: null,
-  // Admin session: the signed token from /api/auth/login unlocks Manage and Admin.
-  adminToken: local.get('adminToken'), adminEmail: local.get('adminEmail'),
-  login: null,     // { email, password, touched, busy } while the admin login dialog is open
-  reg: { full_name: '', email: '', phone_number: '' }, regTouched: false,
+  // The logged-in account from /api/auth/me (the session itself is an HttpOnly cookie).
+  // role 'Admin' unlocks Host, Manage and Admin.
+  user: null, organizerId: Number(local.get('organizer')) || null, after: null,
+  login: { email: '', password: '' }, loginTouched: false,
+  reg: { full_name: '', email: '', phone_number: '', password: '' }, regTouched: false, authBusy: false,
   n: blankEvent(), nTouched: false,
   g: blankOffer(), gTouched: false,
   reports: { daily: [], sales: [], seats: [], usage: [], pending: [], fetchedAt: 0 },
@@ -135,15 +135,15 @@ function setState(patch) {
 
 /* ─────────────────────────── talking to the API ─────────────────────────── */
 
+// The login cookie is sent automatically (same site).
 async function api(method, path, body) {
   const headers = body ? { 'content-type': 'application/json' } : {};
-  if (state.adminToken) headers.authorization = 'Bearer ' + state.adminToken;
-  const res = await fetch('/api' + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  const res = await fetch('/api' + path, { method, headers, credentials: 'same-origin', body: body ? JSON.stringify(body) : undefined });
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { /* not JSON */ }
-  // An admin token that has expired (or was signed with an old password).
-  if (res.status === 401 && state.adminToken && path !== '/auth/login') endAdminSession('Your admin session ended — log in again.');
+  // The session expired or was logged out elsewhere.
+  if (res.status === 401 && state.user && !path.startsWith('/auth/')) endSession('Your session ended — log in again.');
   if (!res.ok) throw new Error((data && data.error) || `${res.status} ${res.statusText}`);
   return data;
 }
@@ -168,7 +168,7 @@ const loaders = {
     setState({ organizers, organizerId: keep ? state.organizerId : first ? first.organizer_id : null });
   }),
   event: () => state.eventId ? get('/events/' + state.eventId).then(dropStaleSelection) : Promise.resolve(),
-  mine: () => state.userId ? get(`/users/${state.userId}/bookings`).then(mine => setState({ mine })) : Promise.resolve(),
+  mine: () => state.user ? get(`/users/${state.user.user_id}/bookings`).then(mine => setState({ mine })) : Promise.resolve(),
   booking: () => state.booking ? get('/bookings/' + state.booking.booking_id).then(setBooking) : Promise.resolve(),
   sales: () => get('/reports/sales-last-30-days').then(r => setReports({ daily: r.daily, sales: r.sales })),
   seats: () => get('/reports/seat-status').then(seats => setReports({ seats })),
@@ -181,17 +181,24 @@ const load = (...names) => Promise.all(names.map(n => loaders[n]())).catch(fail)
 
 // Which data each screen needs, read fresh every time it opens.
 const NEEDS = {
-  customer: { browse: ['events', 'promos'], event: ['event'], seats: ['event', 'promos'], checkout: ['booking'], confirm: ['booking'], mine: ['mine'], auth: ['users'] },
+  customer: { browse: ['events', 'promos'], event: ['event'], seats: ['event', 'promos'], checkout: ['booking'], confirm: ['booking'], mine: ['mine'], auth: [] },
   organizer: { dash: ['organizers', 'allEvents', 'promos'], create: ['organizers'], offer: ['promos'] },
   manager: { sales: ['sales', 'allEvents', 'revenue'], seats: ['seats'], usage: ['usage'], holds: ['pending'] },
   admin: { organizers: ['organizers'], users: ['users'], events: ['allEvents'] }
 };
 const VIEW_KEY = { customer: 'view', organizer: 'oview', manager: 'mview', admin: 'aview' };
 
-const STAFF_ROLES = ['manager', 'admin'];
+// Hosting events, reports and administration all need an Admin account.
+const STAFF_ROLES = ['organizer', 'manager', 'admin'];
+const isAdmin = () => !!(state.user && state.user.role === 'Admin');
 
 function go(role, view) {
-  if (STAFF_ROLES.includes(role) && !state.adminToken) return openAdminLogin();
+  if (STAFF_ROLES.includes(role) && !isAdmin()) {
+    if (state.user) return say('Only admins can do this. Ask an admin to run npm run make-admin for your account.');
+    setState({ after: null });
+    go('customer', 'auth');
+    return say('Log in with an admin account first.');
+  }
   setState({ role, [VIEW_KEY[role]]: view, toast: '' });
   window.scrollTo(0, 0);
   load(...NEEDS[role][view]);
@@ -206,7 +213,6 @@ const openEvent = id => {
 
 /* ─────────────────────────── domain logic ─────────────────────────── */
 
-const currentUser = () => state.users.find(u => u.user_id === state.userId) || null;
 const currentOrganizer = () => state.organizers.find(o => o.organizer_id === state.organizerId) || null;
 const unitLabel = u => u.row_label ? u.row_label + u.seat_number : u.zone_name;
 const priceOf = (ev, u) => (ev.ticket_types.find(t => t.event_ticket_type_id === u.event_ticket_type_id) || {}).price || 0;
@@ -279,10 +285,10 @@ const remainingOf = b => Math.max(0, Math.round((b.total_amount - paidSoFar(b)) 
 
 async function reserve() {
   const S = state, chosen = chosenUnits();
-  if (!S.userId) {
+  if (!S.user) {
     setState({ after: 'seats' });
     go('customer', 'auth');
-    return say('Choose an account first — every booking belongs to one user (BR4).');
+    return say('Log in or create an account first — every booking belongs to one user (BR4).');
   }
   if (!chosen.length) return say('BR9: a booking needs at least one seat or standing place.');
   const units = chosen.map((c, i) => {
@@ -301,7 +307,7 @@ async function reserve() {
   }
   setState({ busy: true });
   try {
-    const b = await api('POST', '/bookings', { user_id: S.userId, units, promo_code: S.code.trim() || undefined });
+    const b = await api('POST', '/bookings', { units, promo_code: S.code.trim() || undefined });
     setBooking(b);
     setState({ selected: [], standing: {}, attendees: {}, attTouched: false, code: '',
       pay: Object.assign({}, S.pay, { amount: String(b.total_amount) }) });
@@ -344,7 +350,7 @@ async function payNow() {
 
 async function cancelBooking(id) {
   try {
-    const b = await api('POST', `/bookings/${id}/cancel`, { user_id: state.userId });
+    const b = await api('POST', `/bookings/${id}/cancel`);
     if (state.booking && state.booking.booking_id === id) setBooking(b);
     say('Booking #' + id + ' cancelled — its seats are back on sale.');
     load('mine');
@@ -363,15 +369,44 @@ async function openBooking(id, view) {
   } catch (err) { fail(err); }
 }
 
-function chooseUser(id) {
-  local.set('user', id);
-  setState({ userId: id, mine: [] });
+/* — accounts — */
+
+// After logging in or registering: back to where the customer was heading.
+function startSession(u, greeting) {
+  setState({ user: u, mine: [] });
   const after = state.after;
   setState({ after: null });
   go('customer', after || 'browse');
   load('mine').then(resumePendingHold);
-  const u = currentUser();
-  say('Booking as ' + (u ? u.full_name : 'user #' + id) + '.');
+  say(greeting + (u.role === 'Admin' ? ' Host, Manage and Admin are unlocked.' : ''));
+}
+
+function endSession(message) {
+  setState({ user: null, mine: [], booking: null });
+  if (STAFF_ROLES.includes(state.role)) go('customer', 'browse');
+  if (message) say(message);
+}
+
+async function logOut() {
+  try { await api('POST', '/auth/logout'); } catch { /* logged out locally either way */ }
+  endSession('Logged out.');
+}
+
+async function logIn() {
+  const l = state.login;
+  setState({ loginTouched: true });
+  if (!EMAIL_RE.test(l.email.trim()) || !l.password) return say('Check the highlighted fields.');
+  setState({ authBusy: true });
+  try {
+    const u = await api('POST', '/auth/login', { email: l.email.trim(), password: l.password });
+    setState({ login: { email: '', password: '' }, loginTouched: false });
+    startSession(u, 'Welcome back, ' + u.full_name + '.');
+  } catch (err) {
+    setState({ login: Object.assign({}, state.login, { password: '' }) });
+    fail(err);
+  } finally {
+    setState({ authBusy: false });
+  }
 }
 // If this user left a hold running, bring its timer back.
 function resumePendingHold() {
@@ -383,17 +418,23 @@ function regErrors(r) {
   const e = {};
   if (!r.full_name.trim()) e.full_name = 'We need a name.';
   if (!EMAIL_RE.test(r.email.trim())) e.email = 'That email does not look right.';
+  if (r.password.length < 8) e.password = 'At least 8 characters.';
   return e;
 }
 async function register() {
   setState({ regTouched: true });
   if (Object.keys(regErrors(state.reg)).length) return say('Check the highlighted fields.');
+  setState({ authBusy: true });
   try {
-    const u = await api('POST', '/users', state.reg);
-    await load('users');
-    setState({ reg: { full_name: '', email: '', phone_number: '' }, regTouched: false });
-    chooseUser(u.user_id);
-  } catch (err) { fail(err); }
+    const r = state.reg;
+    const u = await api('POST', '/auth/register', { full_name: r.full_name.trim(), email: r.email.trim(), phone_number: r.phone_number.trim() || undefined, password: r.password });
+    setState({ reg: { full_name: '', email: '', phone_number: '', password: '' }, regTouched: false });
+    startSession(u, 'Account created — welcome, ' + u.full_name + '.');
+  } catch (err) {
+    fail(err);
+  } finally {
+    setState({ authBusy: false });
+  }
 }
 
 /* — organizer — */
@@ -487,36 +528,6 @@ async function publishOffer() {
     load('promos');
     say(body.coupon_code + ' is live from ' + dayLabel(g.start + 'T00:00') + ' to ' + dayLabel(g.end + 'T00:00') + '.');
   } catch (err) { fail(err); }
-}
-
-/* — admin login — */
-
-const openAdminLogin = () => setState({ login: { email: '', password: '', touched: false, busy: false } });
-
-async function adminLogin() {
-  const l = state.login;
-  setState({ login: Object.assign({}, l, { touched: true }) });
-  if (!EMAIL_RE.test(l.email.trim()) || !l.password) return;
-  setState({ login: Object.assign({}, l, { busy: true, touched: true }) });
-  try {
-    const r = await api('POST', '/auth/login', { email: l.email.trim(), password: l.password });
-    local.set('adminToken', r.token);
-    local.set('adminEmail', r.email);
-    setState({ adminToken: r.token, adminEmail: r.email, login: null });
-    go('manager', state.mview);
-    say('Logged in as admin — Manage and Admin are unlocked.');
-  } catch (err) {
-    setState({ login: Object.assign({}, state.login, { busy: false, password: '' }) });
-    fail(err);
-  }
-}
-
-function endAdminSession(message) {
-  local.set('adminToken', null);
-  local.set('adminEmail', null);
-  setState({ adminToken: null, adminEmail: null });
-  if (STAFF_ROLES.includes(state.role)) go('customer', 'browse');
-  if (message) say(message);
 }
 
 /* — images (events and promotions) — */
@@ -696,26 +707,6 @@ function imagePicker(p, update, label) {
 </div>`;
 }
 
-function adminLoginDialog() {
-  const l = state.login;
-  if (!l) return '';
-  const emailErr = l.touched && !EMAIL_RE.test(l.email.trim()) ? 'Enter the admin email.' : '';
-  const passErr = l.touched && !l.password ? 'Enter the password.' : '';
-  return html`
-<div data-key="logindlg" class="dialog-backdrop" style="z-index:90" data-click="${e => { if (!e.target.closest('.dialog')) setState({ login: null }); }}">
-  <div class="dialog" style="width:min(400px,100%)">
-    <div class="dialog-title">Admin login</div>
-    <div class="dialog-body">Unlocks the Manage and Admin tabs: reports, organizer verification, users and event removal.</div>
-    <div class="field"><label>Email</label><input value="${l.email}" data-input="${set('login', 'email')}" class="input" type="email" autocomplete="username" placeholder="admin@example.com" style="border-color:${bd(emailErr)}">${fieldError(emailErr)}</div>
-    <div class="field"><label>Password</label><input value="${l.password}" data-input="${set('login', 'password')}" class="input" type="password" autocomplete="current-password" style="border-color:${bd(passErr)}">${fieldError(passErr)}</div>
-    <div class="dialog-actions">
-      <button data-click="${() => setState({ login: null })}" class="btn btn-secondary">Cancel</button>
-      <button data-click="${adminLogin}" ${l.busy ? html`disabled` : ''} class="btn btn-primary">${l.busy ? 'Checking…' : 'Log in'}</button>
-    </div>
-  </div>
-</div>`;
-}
-
 function imageDialog() {
   const d = state.imgEdit;
   if (!d) return '';
@@ -737,8 +728,10 @@ function imageDialog() {
 }
 
 
+const LOGO = html`<svg width="22" height="22" viewBox="0 0 32 32" aria-hidden="true" style="flex:none"><path d="M5 7h22a2 2 0 0 1 2 2v4a3 3 0 0 0 0 6v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4a3 3 0 0 0 0-6V9a2 2 0 0 1 2-2z" fill="var(--color-accent)"/><path d="M12.5 11h4.2c2 0 3.3 1 3.3 2.6 0 1-.6 1.8-1.5 2.1 1.2.3 2 1.2 2 2.5 0 1.8-1.4 2.8-3.6 2.8h-4.4zm2.3 1.9v2.4h1.7c.9 0 1.4-.4 1.4-1.2s-.5-1.2-1.4-1.2zm0 4.2v2.6h2c1 0 1.6-.5 1.6-1.3s-.6-1.3-1.6-1.3z" fill="var(--color-bg)"/></svg>`;
+
 function header() {
-  const S = state, user = currentUser();
+  const S = state, user = S.user;
   const roleTag = { customer: 'Attend', organizer: 'Host', manager: 'Manage', admin: 'Admin' }[S.role];
   const pending = S.mine.filter(b => b.booking_status === 'Pending').length;
   const nav = (role, items) => html`
@@ -749,7 +742,7 @@ function header() {
   const left = Math.max(0, S.deadline - S.now);
   return html`
 <div data-key="nav" style="position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:var(--space-6);padding:var(--space-4) var(--space-8);background:color-mix(in srgb, var(--color-bg) 88%, transparent);backdrop-filter:blur(10px);border-bottom:1px solid var(--color-divider)">
-  <button data-click="${() => go('customer', 'browse')}" style="display:flex;align-items:baseline;gap:6px;border:0;background:none;cursor:pointer;padding:0;font-family:var(--font-heading);font-weight:500;font-size:17px;letter-spacing:-.02em;color:var(--color-text)">Bookify<span style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--color-accent)">${roleTag}</span></button>
+  <button data-click="${() => go('customer', 'browse')}" aria-label="Bookify home" style="display:flex;align-items:center;gap:7px;border:0;background:none;cursor:pointer;padding:0;font-family:var(--font-heading);font-weight:500;font-size:17px;letter-spacing:-.02em;color:var(--color-text)">${LOGO}Bookify<span style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--color-accent)">${roleTag}</span></button>
   ${S.role === 'customer' ? html`
   <div style="flex:1;display:flex;align-items:center;gap:var(--space-4);min-width:0">
     <input value="${S.query}" data-input="${e => { setState({ query: e.target.value }); if (S.view !== 'browse') go('customer', 'browse'); }}" placeholder="Search events, venues, organizers" class="input" style="flex:1;min-width:0;max-width:420px;font-size:13px">
@@ -760,15 +753,12 @@ function header() {
   ${S.role === 'manager' ? nav('manager', [['sales', 'Sales'], ['seats', 'Seat status'], ['usage', 'Promotion usage'], ['holds', 'Holds']]) : ''}
   ${S.role === 'admin' ? nav('admin', [['organizers', 'Organizers'], ['users', 'Users'], ['events', 'Events']]) : ''}
   <div style="display:flex;align-items:center;gap:var(--space-3)">
-    <div class="seg" style="font-size:12px">
-      ${[['customer', 'Attend'], ['organizer', 'Host']].concat(S.adminToken ? [['manager', 'Manage'], ['admin', 'Admin']] : []).map(([r, label]) =>
+    ${isAdmin() ? html`<div class="seg" style="font-size:12px">
+      ${[['customer', 'Attend'], ['organizer', 'Host'], ['manager', 'Manage'], ['admin', 'Admin']].map(([r, label]) =>
         html`<button data-click="${() => switchRole(r)}" style="${seg(S.role === r)}">${label}</button>`)}
-    </div>
-    ${S.adminToken
-      ? html`<div style="display:flex;align-items:center;gap:6px" title="Logged in as ${S.adminEmail}"><span class="tag tag-accent" style="font-size:10.5px">Admin</span><button data-click="${() => endAdminSession('Logged out of admin.')}" class="btn btn-ghost" style="font-size:12px">Log out</button></div>`
-      : html`<button data-click="${openAdminLogin}" class="btn btn-ghost" style="font-size:12px;color:var(--color-neutral-400)">Admin login</button>`}
-    ${S.role === 'customer' && user ? html`<div style="display:flex;align-items:center;gap:7px" title="${user.full_name} · ${user.email}"><div style="width:26px;height:26px;border-radius:50%;background:var(--color-accent-800);color:var(--color-accent-200);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500">${user.full_name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}</div><button data-click="${() => go('customer', 'auth')}" class="btn btn-ghost" style="font-size:12px">Switch</button></div>` : ''}
-    ${S.role === 'customer' && !user ? html`<button data-click="${() => go('customer', 'auth')}" class="btn btn-primary" style="font-size:13px">Sign in</button>` : ''}
+    </div>` : ''}
+    ${user ? html`<div style="display:flex;align-items:center;gap:7px" title="${user.full_name} · ${user.email}"><div style="width:26px;height:26px;border-radius:50%;background:var(--color-accent-800);color:var(--color-accent-200);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500">${user.full_name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}</div>${isAdmin() ? html`<span class="tag tag-accent" style="font-size:10.5px">Admin</span>` : ''}<button data-click="${logOut}" class="btn btn-ghost" style="font-size:12px">Log out</button></div>` : ''}
+    ${!user ? html`<button data-click="${() => go('customer', 'auth')}" class="btn btn-primary" style="font-size:13px">Log in</button>` : ''}
   </div>
 </div>
 ${hold ? html`
@@ -1080,10 +1070,10 @@ function confirmView() {
 
 function mineView() {
   const S = state;
-  if (!S.userId) return html`<div class="pane" data-key="mine" style="${EMPTY}">Choose an account to see its reservations. <button data-click="${() => go('customer', 'auth')}" class="btn btn-ghost" style="font-size:13px">Sign in</button></div>`;
+  if (!S.user) return html`<div class="pane" data-key="mine" style="${EMPTY}">Log in to see your reservations. <button data-click="${() => go('customer', 'auth')}" class="btn btn-ghost" style="font-size:13px">Log in</button></div>`;
   const tabs = ['Pending', 'Paid', 'Expired', 'Cancelled'];
   const list = S.mine.filter(b => b.booking_status === S.mineTab);
-  const user = currentUser();
+  const user = S.user;
   return html`
 <div class="pane" data-key="mine" style="display:flex;flex-direction:column;gap:var(--space-6)">
   ${h1('My reservations', user ? user.full_name + ' · ' + user.email + ' — every booking belongs to exactly one user (BR4)' : '')}
@@ -1104,22 +1094,25 @@ function mineView() {
 
 function authView() {
   const S = state, e = S.regTouched ? regErrors(S.reg) : {};
+  const le = S.loginTouched ? { email: EMAIL_RE.test(S.login.email.trim()) ? '' : 'Enter a valid email.', password: S.login.password ? '' : 'Enter your password.' } : {};
+  if (S.user) return html`<div class="pane" data-key="auth" style="${EMPTY}">Logged in as ${S.user.full_name} (${S.user.email}). <button data-click="${logOut}" class="btn btn-ghost" style="font-size:13px">Log out</button></div>`;
   return html`
 <div class="pane" data-key="auth" style="display:flex;flex-wrap:wrap;justify-content:center;gap:var(--space-8);padding-top:var(--space-8)">
-  <div style="width:min(400px,100%);padding:var(--space-8);border-radius:var(--radius-lg);${PANEL}">
-    <h1 style="font-size:24px;margin:0">Choose your account</h1>
-    <div style="font-size:12.5px;line-height:1.6;color:var(--color-neutral-400)">Login and passwords are out of scope for this prototype, so you pick who is booking.</div>
-    <div style="display:flex;flex-direction:column;gap:var(--space-2);max-height:340px;overflow:auto">
-      ${S.users.map(u => html`<button data-click="${() => chooseUser(u.user_id)}" style="${card(u.user_id === S.userId)}"><div style="font-family:var(--font-heading);font-weight:500;font-size:13.5px">${u.full_name}</div><div style="font-size:11.5px;color:var(--color-neutral-500)">${u.email}${u.phone_number ? ' · ' + u.phone_number : ''}</div></button>`)}
-    </div>
+  <div data-key="login" style="width:min(400px,100%);padding:var(--space-8);border-radius:var(--radius-lg);${PANEL}">
+    <h1 style="font-size:24px;margin:0">Log in</h1>
+    <div style="font-size:12.5px;line-height:1.6;color:var(--color-neutral-400)">Logging in first means the ${CONFIG.holdMinutes}-minute hold is never spent on account setup. Admin accounts also unlock Host, Manage and Admin.</div>
+    ${field('Email', S.login.email, set('login', 'email'), { type: 'email', placeholder: 'you@student.example.ac.th', error: le.email })}
+    ${field('Password', S.login.password, set('login', 'password'), { type: 'password', error: le.password })}
+    <button data-click="${logIn}" ${S.authBusy ? html`disabled` : ''} class="btn btn-primary btn-block">${S.authBusy ? 'Checking…' : 'Log in'}</button>
     <button data-click="${() => go('customer', 'browse')}" class="btn btn-ghost" style="font-size:12.5px">Keep browsing as a guest</button>
   </div>
   <div style="width:min(400px,100%);padding:var(--space-8);border-radius:var(--radius-lg);${PANEL}">
-    <h1 style="font-size:24px;margin:0">New here? Register</h1>
+    <h1 style="font-size:24px;margin:0">New here? Create an account</h1>
     ${field('Full name', S.reg.full_name, set('reg', 'full_name'), { placeholder: 'Somchai Jaidee', error: e.full_name })}
-    ${field('Email', S.reg.email, set('reg', 'email'), { placeholder: 'you@student.example.ac.th', error: e.email })}
+    ${field('Email', S.reg.email, set('reg', 'email'), { type: 'email', placeholder: 'you@student.example.ac.th', error: e.email })}
     ${field('Phone (optional)', S.reg.phone_number, set('reg', 'phone_number'), { placeholder: '0812345678' })}
-    <button data-click="${register}" class="btn btn-primary btn-block">Register &amp; continue</button>
+    ${field('Password', S.reg.password, set('reg', 'password'), { type: 'password', placeholder: 'At least 8 characters', error: e.password })}
+    <button data-click="${register}" ${S.authBusy ? html`disabled` : ''} class="btn btn-primary btn-block">Create account &amp; continue</button>
     <div style="font-size:11.5px;color:var(--color-neutral-500)">Each email can register once (BR15).</div>
   </div>
 </div>`;
@@ -1436,8 +1429,8 @@ function adminUsersView() {
   <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:var(--space-4)">
     ${h1('Users', 'Correct a user’s details. Emails stay unique (BR15).')}
     <table class="table">
-      <thead><tr><th>#</th><th>Name</th><th>Email</th><th>Phone</th><th>Joined</th><th></th></tr></thead>
-      <tbody>${S.users.map(x => html`<tr><td>${x.user_id}</td><td>${x.full_name}</td><td>${x.email}</td><td>${x.phone_number || '—'}</td><td>${dayLabel(x.created_at)}</td><td style="text-align:right"><button data-click="${() => setState({ editUser: Object.assign({}, x, { phone_number: x.phone_number || '' }) })}" class="btn btn-ghost" style="font-size:12px">Edit</button></td></tr>`)}</tbody>
+      <thead><tr><th>#</th><th>Name</th><th>Email</th><th>Phone</th><th>Role</th><th>Joined</th><th></th></tr></thead>
+      <tbody>${S.users.map(x => html`<tr><td>${x.user_id}</td><td>${x.full_name}</td><td>${x.email}</td><td>${x.phone_number || '—'}</td><td>${x.role}</td><td>${dayLabel(x.created_at)}</td><td style="text-align:right"><button data-click="${() => setState({ editUser: Object.assign({}, x, { phone_number: x.phone_number || '' }) })}" class="btn btn-ghost" style="font-size:12px">Edit</button></td></tr>`)}</tbody>
     </table>
   </div>
   ${u ? html`
@@ -1481,7 +1474,6 @@ function page() {
     ${body}
   </div>
   ${imageDialog()}
-  ${adminLoginDialog()}
   ${S.toast ? html`<div data-key="toast" style="position:fixed;left:50%;bottom:28px;z-index:80;animation:toastIn .2s ease both;display:flex;align-items:center;gap:var(--space-3);padding:var(--space-4) var(--space-6);border:1px solid var(--color-accent-700);border-radius:var(--radius-md);background:var(--color-accent-900);box-shadow:var(--shadow-lg);font-size:13px;color:var(--color-accent-100);max-width:min(460px,88vw)">${S.toast}</div>` : ''}
 </div>`;
 }
@@ -1506,7 +1498,7 @@ root.addEventListener('click', e => {
   if (el && !el.disabled) handlers[el.dataset.click](e);
 });
 root.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && state.login && e.target.closest('[data-key="logindlg"]')) adminLogin();
+  if (e.key === 'Enter' && !state.authBusy && e.target.closest('[data-key="login"]')) logIn();
 });
 root.addEventListener('input', e => {
   const el = e.target.closest('[data-input]');
@@ -1547,5 +1539,9 @@ setInterval(() => {
 
 render();
 go('customer', 'browse');
-if (state.adminToken) get('/auth/me').catch(() => endAdminSession(null));
-load('users', 'mine').then(resumePendingHold);
+// Still logged in from an earlier visit? (/auth/me returns null for a guest.)
+get('/auth/me').then(user => {
+  if (!user) return;
+  setState({ user });
+  load('mine').then(resumePendingHold);
+}).catch(() => { /* server unreachable: stay logged out */ });

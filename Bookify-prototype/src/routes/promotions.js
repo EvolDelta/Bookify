@@ -4,6 +4,7 @@ const v = require('../validate');
 const { HttpError } = require('../errors');
 const { pool, transaction } = require('../db');
 const { parseImage, imageSrc, sendImage } = require('../images');
+const { requireAdmin } = require('../auth');
 
 const router = express.Router();
 
@@ -26,7 +27,7 @@ router.get('/', async (req, res) => {
 // Amount:  { "coupon_code": "EARLYBIRD", "discount_type": "Amount",  "discount_amount": 100,  "start_date": "...", "end_date": "..." }
 // Percent: { "coupon_code": "SE20",      "discount_type": "Percent", "discount_percent": 20, "max_discount_cap": 300, ... }
 // Either may add "image_url": "https://..." or "image_data": "data:image/...;base64,..."
-router.post('/', async (req, res) => {
+router.post('/', requireAdmin, async (req, res) => {
   const b = req.body;
   const code = v.text(b.coupon_code, 'coupon_code', { max: 30 }).toUpperCase();
   if (!/^[A-Z0-9]+$/.test(code)) throw new HttpError(400, 'coupon_code may only contain letters and digits.');
@@ -62,7 +63,7 @@ router.get('/:id/image', async (req, res) => {
 });
 
 // PUT /api/promotions/:id/image — replace or remove (send neither field) the image
-router.put('/:id/image', async (req, res) => {
+router.put('/:id/image', requireAdmin, async (req, res) => {
   const id = v.id(req.params.id, 'id');
   const [r] = await pool.query('UPDATE promotions SET ?, image_updated_at = NOW() WHERE promo_id = ?', [parseImage(req.body), id]);
   if (!r.affectedRows) throw new HttpError(404, 'Promotion not found.');

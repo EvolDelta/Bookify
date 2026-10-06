@@ -27,7 +27,9 @@ What lives where:
 | `src/services/bookings.js` | Lock → pay → sell flow, run as transactions (BR9, BR17–BR19) |
 | `src/routes/*.js` | The HTTP API |
 | `scripts/db-setup.js` | Builds the database from the `db/` files |
-| `scripts/smoke-test.js` | Automatic checks of the API and the database rules |
+| `src/auth.js`, `src/routes/auth.js` | Sign up, log in, sessions, and the "admins only" checks |
+| `scripts/make-admin.js` | Turns a registered account into an Admin |
+| `scripts/smoke-test.js` | Automatic checks of the API, the login rules and the database rules |
 
 ---
 
@@ -44,7 +46,7 @@ What lives where:
 cp .env.example .env
 ```
 
-Open `.env` and set `DB_PASSWORD` to your local MySQL root password, and `ADMIN_EMAIL` / `ADMIN_PASSWORD` to the admin login (ask a teammate for it). `.env` is in `.gitignore`, so it never gets pushed to GitHub. Keep it that way: **passwords never go into Git.**
+Open `.env` and set `DB_PASSWORD` to your local MySQL root password. `.env` is in `.gitignore`, so it never gets pushed to GitHub. Keep it that way: **passwords never go into Git.**
 
 ### 3. Build the database and test it
 
@@ -63,60 +65,76 @@ npm run dev           # http://localhost:3000 serves the site, http://localhost:
 2. Open `db/queries.sql` and run the queries one at a time (Ctrl+Enter on a query). Screenshots of these results are your M5 deliverable.
 3. Go to **Database → Reverse Engineer…** and pick `bookify`. Workbench draws the diagram from the real tables. Compare it with your Draw.io ERD: every entity should be there, with the same keys. This is the "free check on our diagram" your tech-stack table mentions.
 
-### 5. Try the API
+### 5. Create your admin account
+
+Everyone who signs up on the website is a **Customer**: they can browse and book, but they can't open the **Host** side. To make an admin:
+
+1. Run `npm run dev`, open http://localhost:3000, click **Log in**, and create your account under *New here?* with your own password.
+2. In the terminal, promote that account:
+   ```bash
+   npm run make-admin -- your-email@example.com
+   ```
+3. Reload the page. You'll see an **Admin** badge next to your initials, and the **Attend / Host / Manage / Admin** switch appears.
+
+To turn an admin back into a customer, run `npm run make-admin -- your-email@example.com --remove`. The admin's password never goes into a script or SQL file: they type it on the website, and only a hash is stored.
+
+### 6. Try the API
+
+Bookings need a logged-in user. With `curl`, `-c`/`-b cookies.txt` saves and sends the login cookie, like a browser does:
 
 ```bash
 curl http://localhost:3000/api/events
-curl http://localhost:3000/api/events/1
-curl -X POST http://localhost:3000/api/bookings -H "content-type: application/json" -d "{\"user_id\":2,\"units\":[{\"unit_id\":12}],\"promo_code\":\"EARLYBIRD\"}"
-curl -X POST http://localhost:3000/api/bookings/8/payments -H "content-type: application/json" -d "{\"payment_method\":\"PromptPay\",\"amount\":400}"
+curl -c cookies.txt -X POST http://localhost:3000/api/auth/register -H "content-type: application/json" -d "{\"full_name\":\"Test User\",\"email\":\"test@example.com\",\"password\":\"test-password-1\"}"
+curl -b cookies.txt -X POST http://localhost:3000/api/bookings -H "content-type: application/json" -d "{\"units\":[{\"unit_id\":12}],\"promo_code\":\"EARLYBIRD\"}"
+curl -b cookies.txt -X POST http://localhost:3000/api/bookings/8/payments -H "content-type: application/json" -d "{\"payment_method\":\"PromptPay\",\"amount\":400}"
 ```
 
-(Use whatever `booking_id` the third command returns.) Run the booking command twice and the second one fails with *"Already taken: B2"*.
+(Use whatever `booking_id` the booking command returns.) Run the booking command twice and the second one fails with *"Already taken: B2"*. Without `-b cookies.txt` you get *"Please log in first."*
 
 #### API reference
 
-| Role | Method & path | What it does |
+| Who | Method & path | What it does |
 |---|---|---|
-| Customer | `GET /api/events` | Events on sale with available / locked / sold counts |
-| Customer | `GET /api/events/:id` | One event, its ticket types and every unit's kind, seat or zone, and status |
-| Customer | `GET /api/users`, `POST /api/users` | Pick an account, or register (`full_name`, `email`, `phone_number`) |
-| Customer | `POST /api/bookings` | Lock seats for 5 minutes (`user_id`, `units`, optional `promo_code`) |
-| Customer | `POST /api/bookings/:id/payments` | Record a payment (`payment_method`, `amount`, optional `payment_status`) |
-| Customer | `POST /api/bookings/:id/cancel` | Cancel an unpaid booking (`user_id`) |
-| Customer | `GET /api/users/:id/bookings` | "My reservations" |
-| Organizer | `POST /api/events` | Create a Draft event with seated and/or standing units (see `src/routes/events.js`) |
-| Organizer | `PATCH /api/events/:id/status` | `On_sale` / `Closed` / `Cancelled` |
-| Organizer | `PUT /api/events/:id/image` | Replace or remove the event image (`organizer_id` plus `image_url` or `image_data`; send neither to remove). Only the event's own organizer may change it |
-| Organizer | `GET/POST /api/promotions` | List or create Amount / Percent promotions |
-| Organizer | `PUT /api/promotions/:id/image` | Replace or remove a promotion image |
-| Anyone | `GET /api/events/:id/image`, `GET /api/promotions/:id/image` | The uploaded image file itself |
-| Admin | `POST /api/auth/login` | `email`, `password` → a token for 8 hours. Every route below marked 🔒 needs `Authorization: Bearer <token>` |
-| 🔒 Manager | `GET /api/reports/sales-last-30-days` | O1 |
-| 🔒 Manager | `GET /api/reports/seat-status` | O2: which events are full |
-| 🔒 Manager | `GET /api/reports/promotion-usage` | O4 |
-| 🔒 Manager | `GET /api/reports/pending-bookings` | Unpaid holds and their remaining time |
-| 🔒 Manager | `GET /api/reports/events/:id/revenue` | Takings split by payment method |
-| 🔒 Admin | `POST /api/organizers`, `PATCH /api/organizers/:id/verification` | Register and verify organizers (BR13) |
-| 🔒 Admin | `PATCH /api/users/:id` | Correct a user's details |
-| 🔒 Admin | `DELETE /api/events/:id` | Remove a cancelled event that has no bookings |
+| Anyone | `POST /api/auth/register` | Create a Customer account and log in (`full_name`, `email`, `password` with at least 8 characters) |
+| Anyone | `POST /api/auth/login` · `POST /api/auth/logout` | Log in or out (sets or clears the `bookify_session` cookie) |
+| Anyone | `GET /api/auth/me` | The logged-in user, or `null` |
+| Anyone | `GET /api/events` · `GET /api/events/:id` | Events on sale, and one event with every seat's status |
+| Anyone | `GET /api/promotions` | Promotion codes |
+| Anyone | `GET /api/events/:id/image` · `GET /api/promotions/:id/image` | An uploaded image file |
+| Logged in | `POST /api/bookings` | Lock seats for 5 minutes (`units`, optional `promo_code`) |
+| Logged in | `POST /api/bookings/:id/payments` | Pay your booking (`payment_method`, `amount`, optional `payment_status`) |
+| Logged in | `POST /api/bookings/:id/cancel` | Cancel your unpaid booking |
+| Logged in | `GET /api/bookings/:id` · `GET /api/users/:id/bookings` | Your own booking or reservations (admins can see anyone's) |
+| Admin | `POST /api/events` | Host a Draft event with seated and/or standing units for an organizer (see the comment in `src/routes/events.js`) |
+| Admin | `PUT /api/events/:id/image` | Replace or remove the event image (`organizer_id` plus `image_url` or `image_data`; send neither to remove). The `organizer_id` must be the event's own organizer |
+| Admin | `PATCH /api/events/:id/status` · `DELETE /api/events/:id` | Open, close or cancel an event; remove a cancelled event that has no bookings |
+| Admin | `POST /api/promotions` · `PUT /api/promotions/:id/image` | Create Amount / Percent promotions; replace or remove a promotion image |
+| Admin | `GET /api/reports/...` | `sales-last-30-days` (O1), `seat-status` (O2), `promotion-usage` (O4), `pending-bookings`, `events/:id/revenue` |
+| Admin | `/api/organizers...` | List, register and verify organizers (BR13) |
+| Admin | `GET /api/users` · `POST /api/users` · `PATCH /api/users/:id` | List users, add a user without a login, or correct a user's details |
 
-Login is out of scope in your proposal, so the API trusts the `user_id` the client sends. A real system would get it from a login session instead.
+A guest who calls a login-only route gets **401 Please log in first**. A customer who calls an admin route gets **403 Only admins can do this**. The website hides nothing important: the real check happens in the API (`requireAdmin` in `src/auth.js`), so even a hand-made request can't get past it.
+
+#### How the login works
+
+- **Passwords** are stored as a salted **scrypt** hash in `users.password_hash`, like `scrypt$16384$8$1$<salt>$<hash>`. The same password gives a different hash for every user, and the hash can't be turned back into the password.
+- **Sessions:** after login, the browser gets a random token in an **HttpOnly** cookie, which page JavaScript can't read. The `sessions` table stores only the SHA-256 hash of that token, and a session lasts 7 days.
+- A wrong password and an unknown email get the same message, *"Wrong email or password."*, so nobody can find out which emails have accounts.
 
 #### The website
 
-`npm run dev` and open http://localhost:3000. Everything on the page is read from and written to MySQL through the API above, and the switch at the top right moves between the user roles in the proposal. Manage and Admin only appear after **Admin login** (top right) with the `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `.env`:
+`npm run dev` and open http://localhost:3000. Everything on the page is read from and written to MySQL through the API above. **Log in** (top right) logs in or creates a Customer account. Admin accounts (step 5) also get a switch at the top right between the user roles in the proposal:
 
 | Role | Screens |
 |---|---|
-| Attend (customer) | Browse events and today's promotions → event page → seat map with standing zones → reserve (5-minute hold) → pay (split or failed payments allowed) → ticket codes. "Reservations" lists Pending / Paid / Expired / Cancelled bookings. "Sign in" picks or registers a user, since login is out of scope. |
-| Host (organizer) | Dashboard for the chosen organizer, create an event (seats and/or standing zones per ticket type), open / close / cancel sales, create Amount or Percent promotions |
+| Attend (customer) | Browse events and today's promotions → event page → seat map with standing zones → reserve (5-minute hold) → pay (split or failed payments allowed) → ticket codes. "Reservations" lists Pending / Paid / Expired / Cancelled bookings. Reserving needs a logged-in account. |
+| Host (admin, acting for an organizer) | Dashboard for the chosen organizer, create an event (seats and/or standing zones per ticket type), open / close / cancel sales, create Amount or Percent promotions |
 | Manage (manager) | Sales in the last 30 days and takings by payment method (O1), seat status and full events (O2), promotion usage (O4), unpaid holds with live countdowns |
-| Admin | Verify organizers (BR13), correct user details, cancel and remove events |
+| Admin | Verify organizers (BR13), see users and their roles, correct user details, cancel and remove events |
 
 When the database refuses something, the page shows its message, which starts with the business rule number (for example *"BR11: event needs a ticket type…"*).
 
-An event has no "kind" of its own. Each ticket type describes numbered seats (`rows` + `seats_per_row`), standing places (`zone_name` + `quantity`), or both, so one event can be all seated, all standing, or a mix. Seats become `seated_units` rows and standing places become `standing_units` rows; all of them count against the same `total_capacity`. The prototype has no login or role middleware, so it cannot verify whether a request comes from the organizer, host, or an admin; a production deployment must authorize those roles before allowing event changes.
+An event has no "kind" of its own. Each ticket type describes numbered seats (`rows` + `seats_per_row`), standing places (`zone_name` + `quantity`), or both, so one event can be all seated, all standing, or a mix. Seats become `seated_units` rows and standing places become `standing_units` rows; all of them count against the same `total_capacity`.
 
 Example ticket type that includes both seats and standing places at the same price:
 ```json
@@ -241,7 +259,7 @@ TLS (`DB_SSL=true`) encrypts the connection. Cloud databases are reachable from 
 **Option A: Vercel** (matches your proposal)
 1. Push the project to GitHub. Check that `.env` and `ca.pem` are **not** in the commit.
 2. On vercel.com, go to **Add New → Project** and import the repo. Vercel detects Express from `server.js` (it exports `app`). Check Vercel's current Express docs if the build complains.
-3. Go to **Settings → Environment Variables** and add every `DB_*` variable. For `DB_SSL_CA`, paste the **contents** of `ca.pem`, because there's no file on Vercel. Also add `ADMIN_EMAIL`, `ADMIN_PASSWORD` and a long random `SESSION_SECRET`, plus `DB_POOL_SIZE=2`, since each serverless instance opens its own connections and free databases allow only a few.
+3. Go to **Settings → Environment Variables** and add every `DB_*` variable. For `DB_SSL_CA`, paste the **contents** of `ca.pem`, because there's no file on Vercel. Also add `DB_POOL_SIZE=2`, since each serverless instance opens its own connections and free databases allow only a few.
 4. Deploy, then open `https://<your-app>.vercel.app/api/health`. It should show `"ok": true` and the MySQL version.
 
 **Option B: Render or Railway** (a "normal" always-running server)
@@ -257,5 +275,5 @@ Create a **Web Service** from the repo, with build command `npm install` and sta
 
 ## What isn't done yet
 
-- **Customer and organizer logins.** Only the administrator logs in. Customers pick an account and organizers pick who they act as, because login is out of scope in the proposal.
-- **Login.** Out of scope, per the proposal.
+- **Organizer logins.** Organizers don't have their own accounts: an admin hosts events for them, choosing the organizer in Host.
+- **Proposal update:** login is now built, so move "User login security" from out of scope to in scope, and add `password_hash` and `role` to Users plus the `sessions` table to your entity list and ERD.

@@ -1,87 +1,122 @@
-// Admin login. One administrator account, configured with ADMIN_EMAIL and
-// ADMIN_PASSWORD in .env (never in the code: the repository is public).
-// Logging in returns a signed token that the browser sends back as
-//   Authorization: Bearer <token>
-// The token carries its own expiry and an HMAC signature, so the server keeps
-// no session store — which also works on serverless hosts such as Vercel.
+// Authentication: password hashing, login sessions, and the middleware that
+// decides who may call which API route.
+//
+// How a login works:
+//   1. POST /api/auth/login checks the password against users.password_hash.
+//   2. The server makes a random token, stores its SHA-256 hash in `sessions`,
+//      and sends the token to the browser in an HttpOnly cookie (page
+//      JavaScript cannot read it, so a script injected into the page cannot steal it).
+//   3. On every later request loadUser() hashes the cookie's token, finds the
+//      session and attaches the user to req.user.
 const crypto = require('crypto');
-const express = require('express');
+const { promisify } = require('util');
+const { pool } = require('./db');
 const { HttpError } = require('./errors');
 
-const SESSION_HOURS = 8;
-const MAX_FAILURES = 5;            // wrong passwords allowed per address…
-const LOCK_MINUTES = 15;           // …before it has to wait this long
+const scrypt = promisify(crypto.scrypt);
+const COOKIE = 'bookify_session';
+const SESSION_DAYS = 7;
+const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 64 };
 
-const sha256 = s => crypto.createHash('sha256').update(String(s)).digest();
+// ───────────── passwords ─────────────
+// Stored as "scrypt$N$r$p$salt$hash". The random salt means two people with the
+// same password still get different hashes; scrypt is deliberately slow, so
+// guessing passwords from a stolen table takes far too long to be practical.
 
-function adminConfig() {
-  const email = (process.env.ADMIN_EMAIL || '').trim();
-  const password = process.env.ADMIN_PASSWORD || '';
-  return email && password ? { email, password } : null;
+async function hashPassword(password) {
+  const salt = crypto.randomBytes(16);
+  const hash = await scrypt(password, salt, SCRYPT.keylen, SCRYPT);
+  return ['scrypt', SCRYPT.N, SCRYPT.r, SCRYPT.p, salt.toString('base64'), hash.toString('base64')].join('$');
 }
 
-const secretFor = cfg => process.env.SESSION_SECRET || sha256(`bookify-session\0${cfg.email}\0${cfg.password}`);
-
-function sign(payload, cfg) {
-  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const mac = crypto.createHmac('sha256', secretFor(cfg)).update(body).digest('base64url');
-  return `${body}.${mac}`;
+async function verifyPassword(password, stored) {
+  const [alg, N, r, p, salt, hash] = String(stored || '').split('$');
+  if (alg !== 'scrypt') return false;
+  const expected = Buffer.from(hash, 'base64');
+  const actual = await scrypt(password, Buffer.from(salt, 'base64'), expected.length, { N: +N, r: +r, p: +p });
+  return crypto.timingSafeEqual(actual, expected);
 }
 
-// Returns the session payload, or null if the token is missing, forged or expired.
-function verify(token) {
-  const cfg = adminConfig();
-  if (!cfg || typeof token !== 'string' || !token.includes('.')) return null;
-  const [body, mac] = token.split('.');
-  const expected = crypto.createHmac('sha256', secretFor(cfg)).update(body).digest('base64url');
-  if (mac.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(expected))) return null;
-  let payload;
-  try { payload = JSON.parse(Buffer.from(body, 'base64url').toString()); } catch { return null; }
-  return payload.exp > Date.now() ? payload : null;
+// Used when the email does not exist, so a wrong email takes as long as a wrong
+// password and the response time does not reveal which emails are registered.
+let dummyHash;
+async function burnTime(password) {
+  dummyHash = dummyHash || await hashPassword('not-a-real-password');
+  await verifyPassword(password, dummyHash);
 }
 
-// Express middleware for the Manage and Admin routes.
-function requireAdmin(req, res, next) {
-  const m = /^Bearer (.+)$/.exec(req.get('authorization') || '');
-  if (!m || !verify(m[1])) throw new HttpError(401, 'Admin login required.');
+// ───────────── sessions ─────────────
+
+const sha256 = s => crypto.createHash('sha256').update(s).digest('hex');
+
+function readCookie(req) {
+  const header = req.headers.cookie || '';
+  for (const part of header.split(';')) {
+    const [k, ...v] = part.trim().split('=');
+    if (k === COOKIE) return decodeURIComponent(v.join('='));
+  }
+  return null;
+}
+
+function cookie(value, maxAgeSeconds) {
+  return [
+    `${COOKIE}=${encodeURIComponent(value)}`, 'Path=/', 'HttpOnly', 'SameSite=Lax', `Max-Age=${maxAgeSeconds}`,
+    // Secure = only sent over https. Local http://localhost would drop it, so only in production.
+    ...(process.env.NODE_ENV === 'production' ? ['Secure'] : [])
+  ].join('; ');
+}
+
+async function startSession(res, userId) {
+  const token = crypto.randomBytes(32).toString('base64url');
+  await pool.query('DELETE FROM sessions WHERE expires_at < NOW()'); // tidy up old ones
+  await pool.query(
+    `INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, NOW() + INTERVAL ${SESSION_DAYS} DAY)`,
+    [sha256(token), userId]);
+  res.setHeader('Set-Cookie', cookie(token, SESSION_DAYS * 86400));
+}
+
+async function endSession(req, res) {
+  const token = readCookie(req);
+  if (token) await pool.query('DELETE FROM sessions WHERE token_hash = ?', [sha256(token)]);
+  res.setHeader('Set-Cookie', cookie('', 0));
+}
+
+// ───────────── middleware ─────────────
+
+// Runs on every API request: attaches req.user (or null). Never blocks.
+async function loadUser(req, res, next) {
+  req.user = null;
+  const token = readCookie(req);
+  if (token) {
+    const [[user]] = await pool.query(
+      `SELECT u.user_id, u.full_name, u.email, u.phone_number, u.role
+       FROM sessions s JOIN users u ON u.user_id = s.user_id
+       WHERE s.token_hash = ? AND s.expires_at > NOW()`, [sha256(token)]);
+    req.user = user || null;
+  }
   next();
 }
 
-// Failed logins per address, kept in memory (a restart clears it).
-const failures = new Map();
+function requireUser(req, res, next) {
+  if (!req.user) throw new HttpError(401, 'Please log in first.');
+  next();
+}
 
-const router = express.Router();
+function requireAdmin(req, res, next) {
+  if (!req.user) throw new HttpError(401, 'Please log in first.');
+  if (req.user.role !== 'Admin') throw new HttpError(403, 'Only admins can do this.');
+  next();
+}
 
-// POST /api/auth/login  { "email", "password" } → { token, email, expires_at }
-router.post('/login', (req, res) => {
-  const cfg = adminConfig();
-  if (!cfg) throw new HttpError(503, 'Admin login is not set up: add ADMIN_EMAIL and ADMIN_PASSWORD to .env.');
-  const key = req.ip;
-  const f = failures.get(key);
-  if (f && f.lockedUntil > Date.now()) {
-    const minutes = Math.ceil((f.lockedUntil - Date.now()) / 60000);
-    throw new HttpError(429, `Too many wrong passwords. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`);
+// For "my own data, or any data if you are an admin".
+function assertSelfOrAdmin(req, userId) {
+  if (!req.user) throw new HttpError(401, 'Please log in first.');
+  if (req.user.role !== 'Admin' && req.user.user_id !== userId) {
+    throw new HttpError(403, 'You can only see your own account.');
   }
-  const email = String(req.body.email || '').trim().toLowerCase();
-  const password = String(req.body.password || '');
-  // Compare fixed-length digests so the time taken says nothing about the password.
-  const ok = crypto.timingSafeEqual(sha256(email), sha256(cfg.email.toLowerCase()))
-           & crypto.timingSafeEqual(sha256(password), sha256(cfg.password));
-  if (!ok) {
-    const prev = f && !(f.lockedUntil && f.lockedUntil <= Date.now()) ? f.count : 0;  // an ended lock starts over
-    const count = prev + 1;
-    failures.set(key, { count, lockedUntil: count >= MAX_FAILURES ? Date.now() + LOCK_MINUTES * 60000 : 0 });
-    throw new HttpError(401, 'Wrong email or password.');
-  }
-  failures.delete(key);
-  const exp = Date.now() + SESSION_HOURS * 3600000;
-  res.json({ token: sign({ sub: cfg.email, exp }, cfg), email: cfg.email, expires_at: new Date(exp).toISOString() });
-});
+}
 
-// GET /api/auth/me — is this token still a valid admin session?
-router.get('/me', requireAdmin, (req, res) => {
-  const payload = verify(req.get('authorization').slice(7));
-  res.json({ email: payload.sub, expires_at: new Date(payload.exp).toISOString() });
-});
-
-module.exports = { router, requireAdmin };
+module.exports = {
+  hashPassword, verifyPassword, burnTime, startSession, endSession,
+  loadUser, requireUser, requireAdmin, assertSelfOrAdmin
+};

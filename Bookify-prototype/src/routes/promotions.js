@@ -1,4 +1,4 @@
-// Promotions: a supertype row plus exactly one subtype row (BR24).
+// Promotions: a supertype row plus exactly one subtype row (BR26).
 const express = require('express');
 const v = require('../validate');
 const { HttpError } = require('../errors');

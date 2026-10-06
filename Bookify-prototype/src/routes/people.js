@@ -20,6 +20,12 @@ users.post('/', async (req, res) => {
   res.status(201).json({ user_id: r.insertId, ...u });
 });
 
+// GET /api/users — account picker for customers, user list for the administrator
+users.get('/', async (req, res) => {
+  const [rows] = await pool.query('SELECT * FROM users ORDER BY full_name');
+  res.json(rows);
+});
+
 // GET /api/users/:id
 users.get('/:id', async (req, res) => {
   const [[u]] = await pool.query('SELECT * FROM users WHERE user_id = ?', [v.id(req.params.id, 'id')]);
@@ -46,11 +52,13 @@ users.get('/:id/bookings', async (req, res) => {
   const [rows] = await pool.query(
     `SELECT b.booking_id, b.booking_status, b.created_at, b.lock_expires_at, b.total_amount,
             e.event_id, e.event_name, e.event_date, e.venue_name,
-            GROUP_CONCAT(COALESCE(CONCAT(u.row_label, u.seat_number), CONCAT('#', u.unit_id))
+            GROUP_CONCAT(COALESCE(CONCAT(s.row_label, s.seat_number), st.zone_name)
                          ORDER BY u.unit_id SEPARATOR ', ') AS units
      FROM bookings b
      JOIN booking_items bi       ON bi.booking_id = b.booking_id
      JOIN admission_units u      ON u.unit_id = bi.unit_id
+     LEFT JOIN seated_units s    ON s.unit_id = u.unit_id
+     LEFT JOIN standing_units st ON st.unit_id = u.unit_id
      JOIN event_ticket_types ett ON ett.event_ticket_type_id = u.event_ticket_type_id
      JOIN events e               ON e.event_id = ett.event_id
      WHERE b.user_id = ?

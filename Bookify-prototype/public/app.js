@@ -1,20 +1,28 @@
-/* Gather — event reservation prototype.
- * Plain JavaScript: one state object, a render() that rebuilds the page from
- * template strings, and a small DOM patcher so focus, scroll and hover states
- * survive re-renders. No framework, no build step. */
+/* Bookify — campus ticketing front end.
+ * Plain JavaScript talking to the Express API under /api (MySQL behind it):
+ * one state object, a render() that rebuilds the page from template strings,
+ * and a small DOM patcher so focus, scroll and hover states survive
+ * re-renders. No framework, no build step.
+ * BRxx numbers refer to the business rules in the Lab 7 proposal. The
+ * database enforces them; this page shows them and reports their errors. */
 'use strict';
 
-// Tunables (were design-tool props in the original bundle).
 const CONFIG = {
-  holdMinutes: 5,        // how long seats stay held while paying
-  serviceFee: 1.75,      // € per seat, never discounted
-  promoAutoRotate: true  // rotate the featured-offer carousel every 6s
+  holdMinutes: 5,        // BR17 — fixed by the database (ck_bookings_lock); used in copy only
+  freeWithoutId: 2,      // BR24 — tickets per booking before attendee details are required
+  refreshMs: 8000,       // how often an open seat map or hold list re-reads the database
+  promoAutoRotate: true  // rotate the promotion carousel every 6s
 };
 
-const L = 'ABCDEFGHJKLMNP';
-const euro = n => '€' + n.toFixed(2);
+const TYPE_NAMES = ['VIP', 'Priority', 'Normal'];  // Ticket_Type_Catalog (BR14)
+const PAY_METHODS = ['PromptPay', 'Bank transfer', 'Cash'];  // BR14
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const baht = n => '฿' + Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
+const pad = n => String(n).padStart(2, '0');
+const ymd = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
 
 /* ───────────────────────── rendering helpers ───────────────────────── */
 
@@ -71,34 +79,42 @@ function morphEl(from, to) {
 
 /* ───────────────────────────── state ───────────────────────────── */
 
+// Only per-browser conveniences live here (which account / organizer you
+// last used). Everything that matters lives in MySQL.
+const local = {
+  get(k) { try { return localStorage.getItem('bookify.' + k); } catch { return null; } },
+  set(k, v) { try { v == null ? localStorage.removeItem('bookify.' + k) : localStorage.setItem('bookify.' + k, String(v)); } catch { /* storage blocked */ } }
+};
+
+const blankEvent = () => ({
+  name: '', venue: '', date: '', time: '19:00', capacity: '120',
+  types: {
+    VIP:      { on: true,  price: '1200', rows: 'A',    perRow: '10', zone: '',      qty: '' },
+    Priority: { on: false, price: '500',  rows: 'B, C', perRow: '10', zone: '',      qty: '' },
+    Normal:   { on: true,  price: '300',  rows: '',     perRow: '',   zone: 'Floor', qty: '80' }
+  }
+});
+const blankOffer = () => {
+  const end = new Date(); end.setDate(end.getDate() + 30);
+  return { type: 'Amount', value: '100', cap: '', code: '', start: ymd(new Date()), end: ymd(end) };
+};
+
 const state = {
-  role: 'attendee', view: 'browse', oview: 'dash',
-  query: '', cat: 'All', promo: 0,
-  eventId: 'e1', selected: [], holdStart: 0, holdEvent: null,
-  code: '', appliedCode: null, codeMsg: '', codeOk: false,
-  f: { name: '', email: '', card: '', exp: '', cvc: '' },
-  a: { name: '', email: '' }, user: null,
-  l: { email: '', password: '' }, loginTouched: false,
-  touched: false, authTouched: false, paying: false,
-  orders: [], expired: [], lastOrder: null, mineTab: 'upcoming',
-  n: { title: '', cat: 'Live music', venue: '', date: '', time: '20:30', about: '', price: '38', rows: '8', cols: '16', hold: 5 },
-  nTouched: false,
-  g: { type: 'percent', value: '25', code: '', cap: '200', event: 'all', featured: true },
-  gTouched: false,
-  events: [
-    { id: 'e1', title: 'Autumn Sessions — Night Four', cat: 'Live music', venue: 'Teatro Sá da Bandeira, Lisbon', date: '2026-10-17', time: '20:30', price: 45, rows: 8, cols: 18, hold: 5, mine: true, about: 'A four-set evening across the main hall and the upper gallery. Doors at 20:00, seated throughout, back by midnight.' },
-    { id: 'e2', title: 'Build Week: systems track', cat: 'Conference', venue: 'Fábrica Pavilion, Porto', date: '2026-10-18', time: '10:00', price: 60, rows: 7, cols: 14, hold: 10, mine: true, about: 'Six talks and two clinics on building and maintaining design systems at scale. Lunch included.' },
-    { id: 'e3', title: 'Derby night — Norte vs Sul', cat: 'Sports', venue: 'Estádio Municipal, Braga', date: '2026-10-23', time: '19:00', price: 35, rows: 9, cols: 20, hold: 5, mine: false, about: 'League fixture, away end closed. Reserved seating in the east stand only.' },
-    { id: 'e4', title: 'Late Set: improv double bill', cat: 'Comedy', venue: 'Cine Alvalade, Lisbon', date: '2026-10-22', time: '21:00', price: 14, rows: 6, cols: 12, hold: 5, mine: true, about: 'Two troupes, one suggestion from the audience, ninety minutes without a net.' },
-    { id: 'e5', title: 'Ceramics intensive', cat: 'Workshop', venue: 'Atelier Rua Verde, Lisbon', date: '2026-10-24', time: '11:00', price: 48, rows: 3, cols: 4, hold: 15, mine: false, about: 'Twelve places only. Wheel work, trimming and a glaze primer; everything fired and posted to you.' }
-  ],
-  offers: [
-    { code: 'AUTUMN40', type: 'percent', value: 40, event: 'e1', cap: 200, used: 148, featured: true, active: true },
-    { code: 'DERBY10', type: 'fixed', value: 10, event: 'e3', cap: 500, used: 61, featured: true, active: true },
-    { code: 'FRIENDS15', type: 'percent', value: 15, event: 'all', cap: 0, used: 103, featured: false, active: true }
-  ],
-  baseHolds: 1802, baseExpired: 324, baseStarted: 1556, basePaid: 1284,
-  startedHolds: 0, expiredHolds: 0, paymentsStarted: 0,
+  role: 'customer', view: 'browse', oview: 'dash', mview: 'sales', aview: 'organizers', rules: false,
+  query: '', filter: 'All', promo: 0,
+  events: [], promos: [], users: [], organizers: [], allEvents: [],
+  eventId: null, event: null,
+  selected: [], standing: {}, attendees: {}, attTouched: false, code: '',
+  booking: null, deadline: 0, expiring: false, busy: false,
+  pay: { method: 'PromptPay', amount: '', status: 'Successful' },
+  mine: [], mineTab: 'Pending',
+  userId: Number(local.get('user')) || null, organizerId: Number(local.get('organizer')) || null, after: null,
+  reg: { full_name: '', email: '', phone_number: '' }, regTouched: false,
+  n: blankEvent(), nTouched: false,
+  g: blankOffer(), gTouched: false,
+  reports: { daily: [], sales: [], seats: [], usage: [], pending: [], fetchedAt: 0 },
+  revenueEvent: '', revenue: null,
+  orgForm: { organizer_name: '', contact_email: '' }, editUser: null,
   now: Date.now(), toast: ''
 };
 
@@ -108,181 +124,395 @@ function setState(patch) {
   if (!renderQueued) { renderQueued = true; queueMicrotask(render); }
 }
 
-/* ─────────────────────────── domain logic ─────────────────────────── */
+/* ─────────────────────────── talking to the API ─────────────────────────── */
+
+async function api(method, path, body) {
+  const res = await fetch('/api' + path, {
+    method,
+    headers: body ? { 'content-type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { /* not JSON */ }
+  if (!res.ok) throw new Error((data && data.error) || `${res.status} ${res.statusText}`);
+  return data;
+}
+const get = path => api('GET', path);
 
 let toastTimer;
-function say(msg) {
+function say(msg, ms = 3200) {
   setState({ toast: msg });
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => setState({ toast: '' }), 2600);
+  toastTimer = setTimeout(() => setState({ toast: '' }), ms);
+}
+const fail = err => say(err.message, 5200);
+
+const loaders = {
+  events: () => get('/events').then(events => setState({ events })),
+  allEvents: () => get('/events?status=all').then(allEvents => setState({ allEvents })),
+  promos: () => get('/promotions').then(promos => setState({ promos })),
+  users: () => get('/users').then(users => setState({ users })),
+  organizers: () => get('/organizers').then(organizers => {
+    const keep = organizers.some(o => o.organizer_id === state.organizerId);
+    const first = organizers.find(o => o.verification_status === 'Verified') || organizers[0];
+    setState({ organizers, organizerId: keep ? state.organizerId : first ? first.organizer_id : null });
+  }),
+  event: () => state.eventId ? get('/events/' + state.eventId).then(dropStaleSelection) : Promise.resolve(),
+  mine: () => state.userId ? get(`/users/${state.userId}/bookings`).then(mine => setState({ mine })) : Promise.resolve(),
+  booking: () => state.booking ? get('/bookings/' + state.booking.booking_id).then(setBooking) : Promise.resolve(),
+  sales: () => get('/reports/sales-last-30-days').then(r => setReports({ daily: r.daily, sales: r.sales })),
+  seats: () => get('/reports/seat-status').then(seats => setReports({ seats })),
+  usage: () => get('/reports/promotion-usage').then(usage => setReports({ usage })),
+  pending: () => get('/reports/pending-bookings').then(pending => setReports({ pending, fetchedAt: Date.now() })),
+  revenue: () => state.revenueEvent ? get(`/reports/events/${state.revenueEvent}/revenue`).then(revenue => setState({ revenue })) : Promise.resolve()
+};
+const setReports = patch => setState({ reports: Object.assign({}, state.reports, patch) });
+const load = (...names) => Promise.all(names.map(n => loaders[n]())).catch(fail);
+
+// Which data each screen needs, read fresh every time it opens.
+const NEEDS = {
+  customer: { browse: ['events', 'promos'], event: ['event'], seats: ['event', 'promos'], checkout: ['booking'], confirm: ['booking'], mine: ['mine'], auth: ['users'] },
+  organizer: { dash: ['organizers', 'allEvents', 'promos'], create: ['organizers'], offer: ['promos'] },
+  manager: { sales: ['sales', 'allEvents', 'revenue'], seats: ['seats'], usage: ['usage'], holds: ['pending'] },
+  admin: { organizers: ['organizers'], users: ['users'], events: ['allEvents'] }
+};
+const VIEW_KEY = { customer: 'view', organizer: 'oview', manager: 'mview', admin: 'aview' };
+
+function go(role, view) {
+  setState({ role, [VIEW_KEY[role]]: view, rules: false, toast: '' });
+  window.scrollTo(0, 0);
+  load(...NEEDS[role][view]);
+}
+const switchRole = role => go(role, state[VIEW_KEY[role]]);
+const openEvent = id => {
+  // A different event starts with an empty selection.
+  if (!state.event || state.event.event_id !== id) setState({ event: null, selected: [], standing: {}, attendees: {}, attTouched: false });
+  setState({ eventId: id });
+  go('customer', 'event');
+};
+
+/* ─────────────────────────── domain logic ─────────────────────────── */
+
+const currentUser = () => state.users.find(u => u.user_id === state.userId) || null;
+const currentOrganizer = () => state.organizers.find(o => o.organizer_id === state.organizerId) || null;
+const unitLabel = u => u.row_label ? u.row_label + u.seat_number : u.zone_name;
+const priceOf = (ev, u) => (ev.ticket_types.find(t => t.event_ticket_type_id === u.event_ticket_type_id) || {}).price || 0;
+const kindLabel = e => e.seated_units && e.standing_units ? 'Seated + standing' : e.standing_units ? 'Standing' : e.seated_units ? 'Seated' : 'No units yet';
+
+function whenLabel(iso) {
+  const d = new Date(iso);
+  return DAYS[d.getDay()] + ' ' + d.getDate() + ' ' + MONTHS[d.getMonth()] + ' ' + d.getFullYear() + ' · ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+const dayLabel = iso => { const d = new Date(iso); return d.getDate() + ' ' + MONTHS[d.getMonth()] + ' ' + d.getFullYear(); };
+const clock = ms => Math.floor(ms / 60000) + ':' + pad(Math.floor(ms / 1000) % 60);
+
+function promoLabel(p) {
+  if (p.discount_type === 'Amount') return baht(p.discount_amount) + ' off';
+  return Number(p.discount_percent) + '% off' + (p.max_discount_cap ? ' (up to ' + baht(p.max_discount_cap) + ')' : '');
 }
 
-const holdMs = () => CONFIG.holdMinutes * 60000;
-function holdLeft() {
-  if (!state.holdStart) return 0;
-  return Math.max(0, state.holdStart + holdMs() - state.now);
-}
-const findEvent = id => state.events.find(e => e.id === (id || state.eventId)) || state.events[0];
-function featured() {
-  const f = state.offers.filter(o => o.active && o.featured);
-  return f.length ? f : state.offers.filter(o => o.active).slice(0, 1);
-}
-
-function seatSold(ev, r, c) {
-  const k = r * ev.cols + c;
-  if ((k * 7) % 11 === 0 || (k * 13) % 23 === 0) return true;
-  return state.orders.some(o => o.eventId === ev.id && o.seatKeys.includes(r + '-' + c));
-}
-function seatHeldByOther(ev, r, c) { const k = r * ev.cols + c; return (k * 17) % 29 === 0; }
-function tierOf(ev, r) {
-  if (r === 0 || r === 1) return { name: 'Premium — front', mult: 1.6, mark: 'P' };
-  if (r >= ev.rows - 2) return { name: 'Gallery', mult: 0.7, mark: 'G' };
-  return { name: 'General — stalls', mult: 1, mark: '' };
-}
-const seatPrice = (ev, r) => Math.round(ev.price * tierOf(ev, r).mult);
-function seatLabel(ev, key) { const [r, c] = key.split('-').map(Number); return L[r] + '-' + (c + 1); }
-
-function offerFor(ev, code) {
-  const o = state.offers.find(x => x.active && x.code === String(code || '').trim().toUpperCase());
-  if (!o) return null;
-  if (o.event !== 'all' && o.event !== ev.id) return { err: 'That code is for a different event.' };
-  if (o.cap > 0 && o.used >= o.cap) return { err: 'That code has hit its redemption cap.' };
-  return { offer: o };
-}
-const autoOffer = ev => state.offers.find(o => o.active && o.featured && o.event === ev.id) || null;
-
-function money(ev) {
-  const seats = state.selected;
-  const sub = seats.reduce((t, k) => t + seatPrice(ev, Number(k.split('-')[0])), 0);
-  const ap = state.appliedCode ? state.offers.find(o => o.code === state.appliedCode) : null;
-  let disc = 0;
-  if (ap) disc = ap.type === 'percent' ? sub * ap.value / 100 : Math.min(sub, ap.value * seats.length);
-  const fee = seats.length ? CONFIG.serviceFee * seats.length : 0;
-  return { sub, disc, fee, total: Math.max(0, sub - disc + fee), offer: ap };
-}
-
-function whenLabel(ev) {
-  const d = new Date(ev.date + 'T00:00');
-  return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()] + ' ' + d.getDate() + ' ' + MONTHS[d.getMonth()] + ' · ' + ev.time;
-}
-const capacity = ev => ev.rows * ev.cols;
-function soldCount(ev) {
-  let n = 0;
-  for (let r = 0; r < ev.rows; r++) for (let c = 0; c < ev.cols; c++) if (seatSold(ev, r, c)) n++;
-  return n;
-}
-
-const go = view => setState({ view, toast: '' });
-const openEvent = id => setState({ eventId: id, view: 'event', role: 'attendee' });
-
-function pickSeat(ev, r, c) {
-  const key = r + '-' + c;
-  if (seatSold(ev, r, c)) return say('That seat is already sold.');
-  if (seatHeldByOther(ev, r, c)) return say('Someone else is holding that seat right now.');
-  const sel = state.selected;
-  if (sel.includes(key)) {
-    const next = sel.filter(k => k !== key);
-    setState({ selected: next, holdStart: next.length ? state.holdStart : 0, appliedCode: next.length ? state.appliedCode : null, codeMsg: '' });
-    return;
+// Standing units of one ticket type in one zone are interchangeable, so they
+// are picked by count rather than one by one.
+function standingGroups(ev) {
+  const groups = new Map();
+  for (const u of ev.units) {
+    if (u.unit_kind !== 'Standing') continue;
+    const key = u.event_ticket_type_id + '|' + u.zone_name;
+    if (!groups.has(key)) groups.set(key, { key, zone: u.zone_name, type: u.type_name, price: priceOf(ev, u), units: [] });
+    groups.get(key).units.push(u);
   }
-  if (sel.length >= 6) return say('Six seats is the maximum per order.');
-  const first = sel.length === 0;
-  const auto = first ? autoOffer(ev) : null;
-  setState({
-    selected: sel.concat([key]),
-    holdEvent: ev.id,
-    holdStart: first ? Date.now() : state.holdStart,
-    startedHolds: first ? state.startedHolds + 1 : state.startedHolds,
-    appliedCode: state.appliedCode || (auto ? auto.code : null),
-    codeMsg: '', code: state.code || (auto ? auto.code : '')
+  return Array.from(groups.values()).map(g => Object.assign(g, { free: g.units.filter(u => u.unit_status === 'Available') }));
+}
+
+// Everything currently picked on the seat map, in booking order.
+function chosenUnits() {
+  const ev = state.event;
+  if (!ev) return [];
+  const seats = state.selected.map(id => ev.units.find(u => u.unit_id === id)).filter(Boolean)
+    .map(u => ({ unit: u, label: 'Seat ' + unitLabel(u), type: u.type_name, price: priceOf(ev, u) }));
+  const standing = standingGroups(ev).flatMap(g => g.free.slice(0, state.standing[g.key] || 0)
+    .map(u => ({ unit: u, label: g.zone + ' (standing)', type: g.type, price: g.price, group: g.key })));
+  return seats.concat(standing);
+}
+
+// After a refresh, drop picks somebody else locked or bought in the meantime.
+function dropStaleSelection(ev) {
+  const free = id => { const u = ev.units.find(x => x.unit_id === id); return u && u.unit_status === 'Available'; };
+  const selected = state.selected.filter(free);
+  const standing = {};
+  for (const g of standingGroups(ev)) if (state.standing[g.key]) standing[g.key] = Math.min(state.standing[g.key], g.free.length);
+  const lost = state.selected.length - selected.length;
+  setState({ event: ev, selected, standing });
+  if (lost) say(plural(lost, 'seat') + ' you picked just went to someone else.');
+}
+
+function toggleSeat(u) {
+  if (u.unit_status === 'Sold') return say('That seat is already sold (BR20 — a unit sells once only).');
+  if (u.unit_status === 'Locked') return say('Someone is holding that seat for ' + CONFIG.holdMinutes + ' minutes (BR17).');
+  const sel = state.selected;
+  setState({ selected: sel.includes(u.unit_id) ? sel.filter(id => id !== u.unit_id) : sel.concat([u.unit_id]) });
+}
+function stepStanding(g, delta) {
+  const n = Math.max(0, Math.min(g.free.length, (state.standing[g.key] || 0) + delta));
+  if (delta > 0 && n === (state.standing[g.key] || 0)) return say('No more free places in ' + g.zone + '.');
+  setState({ standing: Object.assign({}, state.standing, { [g.key]: n }) });
+}
+
+function setBooking(b) {
+  setState({ booking: b, deadline: Date.now() + (b.seconds_left || 0) * 1000, expiring: false });
+}
+const paidSoFar = b => b.payments.filter(p => p.payment_status === 'Successful').reduce((t, p) => t + p.amount, 0);
+const remainingOf = b => Math.max(0, Math.round((b.total_amount - paidSoFar(b)) * 100) / 100);
+
+async function reserve() {
+  const S = state, chosen = chosenUnits();
+  if (!S.userId) {
+    setState({ after: 'seats' });
+    go('customer', 'auth');
+    return say('Choose an account first — every booking belongs to one user (BR4).');
+  }
+  if (!chosen.length) return say('BR9: a booking needs at least one seat or standing place.');
+  const units = chosen.map((c, i) => {
+    if (i < CONFIG.freeWithoutId) return { unit_id: c.unit.unit_id };
+    const a = S.attendees[i] || {};
+    return { unit_id: c.unit.unit_id, attendee_name: (a.name || '').trim(), identity_number: (a.idn || '').trim() };
   });
-  if (first) say('Seats held for ' + CONFIG.holdMinutes + ' minutes — pay to keep them.');
+  const extra = units.slice(CONFIG.freeWithoutId);
+  if (extra.some(u => !u.attendee_name || !u.identity_number)) {
+    setState({ attTouched: true });
+    return say('BR24: every ticket after the 2nd needs the attendee’s name and ID number.');
+  }
+  if (new Set(extra.map(u => u.identity_number)).size !== extra.length) {
+    setState({ attTouched: true });
+    return say('BR24: each extra ticket must be for a different person.');
+  }
+  setState({ busy: true });
+  try {
+    const b = await api('POST', '/bookings', { user_id: S.userId, units, promo_code: S.code.trim() || undefined });
+    setBooking(b);
+    setState({ selected: [], standing: {}, attendees: {}, attTouched: false, code: '',
+      pay: Object.assign({}, S.pay, { amount: String(b.total_amount) }) });
+    go('customer', 'checkout');
+    load('mine');
+    say('Held for ' + CONFIG.holdMinutes + ' minutes (BR17) — pay to make it permanent.');
+  } catch (err) {
+    fail(err);
+    load('event');
+  } finally {
+    setState({ busy: false });
+  }
 }
 
-function expire() {
-  const ev = findEvent(state.holdEvent);
-  setState(s => ({
-    expired: s.expired.concat([{ id: 'x' + Date.now(), eventId: ev.id, seats: s.selected.map(k => seatLabel(ev, k)).join(', ') || '—' }]),
-    selected: [], holdStart: 0, appliedCode: null, expiredHolds: s.expiredHolds + 1,
-    view: s.view === 'checkout' || s.view === 'seats' ? 'event' : s.view
-  }));
-  say('The hold expired — those seats went back on sale.');
+async function payNow() {
+  const S = state, b = S.booking, amount = Number(S.pay.amount);
+  if (!(amount > 0)) return say('The payment amount must be above zero (BR19).');
+  setState({ busy: true });
+  try {
+    const nb = await api('POST', `/bookings/${b.booking_id}/payments`,
+      { payment_method: S.pay.method, amount, payment_status: S.pay.status });
+    setBooking(nb);
+    load('mine');
+    if (nb.booking_status === 'Paid') {
+      go('customer', 'confirm');
+      say('Paid — ' + plural(nb.items.length, 'ticket') + ' issued (BR12).');
+    } else {
+      setState({ pay: Object.assign({}, S.pay, { amount: String(remainingOf(nb)) }) });
+      say(S.pay.status === 'Successful'
+        ? 'Partial payment recorded — ' + baht(remainingOf(nb)) + ' still due before it counts as paid (BR19).'
+        : 'Recorded as ' + S.pay.status + ' — only Successful payments count toward the total (BR19).');
+    }
+  } catch (err) {
+    fail(err);
+    load('booking');
+  } finally {
+    setState({ busy: false });
+  }
 }
 
-function validCheckout() {
-  const f = state.f, e = {};
-  if (!f.name.trim()) e.name = 'We need a name for the ticket.';
-  if (!EMAIL_RE.test(f.email.trim())) e.email = 'That email does not look right.';
-  if (f.card.replace(/\D/g, '').length < 15) e.card = 'Enter all 16 digits.';
-  if (!/^(0[1-9]|1[0-2])\s*\/\s*\d{2}$/.test(f.exp.trim())) e.exp = 'Use MM/YY.';
-  if (f.cvc.replace(/\D/g, '').length < 3) e.cvc = '3 digits.';
+async function cancelBooking(id) {
+  try {
+    const b = await api('POST', `/bookings/${id}/cancel`, { user_id: state.userId });
+    if (state.booking && state.booking.booking_id === id) setBooking(b);
+    say('Booking #' + id + ' cancelled — its seats are back on sale.');
+    load('mine');
+  } catch (err) { fail(err); }
+}
+
+async function openBooking(id, view) {
+  try {
+    const b = await get('/bookings/' + id);
+    setBooking(b);
+    if (b.items.length && (!state.event || state.event.event_id !== b.items[0].event_id)) {
+      setState({ eventId: b.items[0].event_id });
+      await load('event');
+    }
+    go('customer', view || (b.booking_status === 'Pending' ? 'checkout' : 'confirm'));
+  } catch (err) { fail(err); }
+}
+
+function chooseUser(id) {
+  local.set('user', id);
+  setState({ userId: id, mine: [] });
+  const after = state.after;
+  setState({ after: null });
+  go('customer', after || 'browse');
+  load('mine').then(resumePendingHold);
+  const u = currentUser();
+  say('Booking as ' + (u ? u.full_name : 'user #' + id) + '.');
+}
+// If this user left a hold running, bring its timer back.
+function resumePendingHold() {
+  const p = state.mine.find(b => b.booking_status === 'Pending');
+  if (p && (!state.booking || state.booking.booking_status !== 'Pending')) get('/bookings/' + p.booking_id).then(setBooking).catch(() => {});
+}
+
+function regErrors(r) {
+  const e = {};
+  if (!r.full_name.trim()) e.full_name = 'We need a name.';
+  if (!EMAIL_RE.test(r.email.trim())) e.email = 'That email does not look right.';
   return e;
 }
+async function register() {
+  setState({ regTouched: true });
+  if (Object.keys(regErrors(state.reg)).length) return say('Check the highlighted fields.');
+  try {
+    const u = await api('POST', '/users', state.reg);
+    await load('users');
+    setState({ reg: { full_name: '', email: '', phone_number: '' }, regTouched: false });
+    chooseUser(u.user_id);
+  } catch (err) { fail(err); }
+}
 
-function pay() {
-  const errs = validCheckout();
-  setState({ touched: true, paymentsStarted: state.paymentsStarted + 1 });
-  if (Object.keys(errs).length) return say('Check the highlighted fields.');
-  const ev = findEvent(state.holdEvent || state.eventId);
-  const m = money(ev);
-  setState({ paying: true });
-  setTimeout(() => {
-    const keys = state.selected.slice();
-    const order = {
-      id: 'GTH-' + String(4000 + Math.floor(Math.random() * 5999)) + '-' + String(10 + Math.floor(Math.random() * 89)),
-      eventId: ev.id, seatKeys: keys, seats: keys.map(k => seatLabel(ev, k)).join(', '),
-      total: m.total, code: m.offer ? m.offer.code : '—', discount: m.disc,
-      buyer: state.f.name.trim(), email: state.f.email.trim(), status: 'Paid'
-    };
-    setState(s => ({
-      orders: s.orders.concat([order]), lastOrder: order, selected: [], holdStart: 0, paying: false, view: 'confirm',
-      offers: s.offers.map(o => (m.offer && o.code === m.offer.code ? Object.assign({}, o, { used: o.used + 1 }) : o)),
-      appliedCode: null, code: '', touched: false
-    }));
-  }, 900);
+/* — organizer — */
+
+function eventPlan(n) {
+  const types = [], seen = new Set();
+  let dupRow = null;
+  for (const name of TYPE_NAMES) {
+    const t = n.types[name];
+    if (!t.on) continue;
+    const rows = t.rows.split(/[\s,]+/).map(r => r.trim().toUpperCase()).filter(Boolean);
+    rows.forEach(r => { if (seen.has(r)) dupRow = r; seen.add(r); });
+    const perRow = Number(t.perRow) || 0, qty = Number(t.qty) || 0, zone = t.zone.trim();
+    types.push({ name, price: Number(t.price), rows, perRow, zone, qty, seats: rows.length * perRow, standing: zone ? qty : 0 });
+  }
+  const seated = types.reduce((s, t) => s + t.seats, 0), standing = types.reduce((s, t) => s + t.standing, 0);
+  return { types, seated, standing, total: seated + standing, dupRow };
 }
 
 function eventErrors(n) {
-  const e = {};
-  if (!n.title.trim()) e.nTitle = 'Give it a title.';
-  if (!n.venue.trim()) e.nVenue = 'Venue is required.';
-  if (!n.date) e.nDate = 'Pick a date.';
-  if (!(Number(n.price) > 0)) e.nPrice = 'Price must be above zero.';
+  const p = eventPlan(n), e = {}, cap = Number(n.capacity);
+  if (!n.name.trim()) e.name = 'Give it a name.';
+  if (!n.venue.trim()) e.venue = 'Venue is required.';
+  if (!n.date) e.date = 'Pick a date.';
+  else if (new Date(n.date + 'T' + (n.time || '00:00')) <= new Date()) e.date = 'BR23: the event date must be in the future.';
+  if (!(Number.isInteger(cap) && cap > 0)) e.capacity = 'A whole number above zero.';
+  else if (p.total > cap) e.capacity = 'BR22: ' + p.total + ' units but the capacity is ' + cap + '.';
+  if (!p.types.length) e.types = 'BR11: offer at least one ticket type.';
+  for (const t of p.types) {
+    if (e.types) break;
+    if (!(t.price > 0)) e.types = 'BR21: ' + t.name + ' needs a price above zero.';
+    else if ((t.rows.length > 0) !== (t.perRow > 0)) e.types = t.name + ': give both rows and seats per row.';
+    else if ((t.zone !== '') !== (t.qty > 0)) e.types = t.name + ': give both a standing zone and a quantity.';
+    else if (!t.seats && !t.standing) e.types = t.name + ' needs seats, a standing zone, or both (BR10).';
+  }
+  if (!e.types && p.dupRow) e.types = 'BR16: row ' + p.dupRow + ' is used twice — a row and seat must be unique in the event.';
   return e;
 }
 
-function publishEvent() {
-  const n = state.n;
+async function createEvent() {
+  const n = state.n, org = currentOrganizer();
   setState({ nTouched: true });
-  if (Object.keys(eventErrors(n)).length) return say('Three checks failed — see the form.');
-  const id = 'e' + (state.events.length + 1) + Date.now().toString().slice(-3);
-  const ev = {
-    id, title: n.title.trim(), cat: n.cat, venue: n.venue.trim(), date: n.date, time: n.time || '20:00',
-    price: Number(n.price), rows: Math.max(2, Math.min(14, Number(n.rows) || 8)), cols: Math.max(4, Math.min(22, Number(n.cols) || 16)),
-    hold: n.hold, mine: true, about: n.about.trim() || 'Details to follow from the organizer.'
-  };
-  setState(s => ({ events: s.events.concat([ev]), nTouched: false, n: Object.assign({}, s.n, { title: '', venue: '', about: '' }) }));
-  say('“' + ev.title + '” is live in browse with ' + capacity(ev) + ' seats.');
+  if (Object.keys(eventErrors(n)).length) return say('Some checks failed — see the form.');
+  if (!org) return say('Pick which organizer you are first.');
+  const p = eventPlan(n);
+  try {
+    const r = await api('POST', '/events', {
+      organizer_id: org.organizer_id, event_name: n.name.trim(), venue_name: n.venue.trim(),
+      event_date: n.date + ' ' + (n.time || '19:00'), total_capacity: Number(n.capacity),
+      ticket_types: p.types.map(t => Object.assign({ type_name: t.name, price: t.price },
+        t.seats ? { rows: t.rows, seats_per_row: t.perRow } : {},
+        t.standing ? { zone_name: t.zone, quantity: t.qty } : {}))
+    });
+    setState({ n: blankEvent(), nTouched: false });
+    go('organizer', 'dash');
+    say('Draft created with ' + plural(r.units_created, 'unit') + ' — open it for sale from the dashboard.');
+  } catch (err) { fail(err); }
+}
+
+async function setEventStatus(id, status) {
+  try {
+    await api('PATCH', `/events/${id}/status`, { event_status: status });
+    say({ On_sale: 'On sale — customers can book it now.', Closed: 'Sales closed.', Cancelled: 'Event cancelled.', Draft: 'Back to draft.' }[status]);
+  } catch (err) { fail(err); }
+  load('allEvents');
 }
 
 function offerErrors(g) {
-  const e = {};
-  const code = g.code.trim().toUpperCase();
-  if (!/^[A-Z0-9]{4,14}$/.test(code)) e.gCode = '4–14 letters or numbers.';
-  else if (state.offers.some(o => o.code === code)) e.gCode = 'That code already exists.';
-  if (!(Number(g.value) > 0)) e.gValue = 'Value must be above zero.';
-  else if (g.type === 'percent' && Number(g.value) > 90) e.gValue = 'Cap percentage offers at 90%.';
+  const e = {}, code = g.code.trim().toUpperCase(), v = Number(g.value);
+  if (!/^[A-Z0-9]{3,30}$/.test(code)) e.code = '3–30 letters or numbers.';
+  else if (state.promos.some(p => p.coupon_code === code)) e.code = 'That code already exists.';
+  if (!(v > 0)) e.value = 'Must be above zero.';
+  else if (g.type === 'Percent' && v > 100) e.value = 'At most 100%.';
+  if (g.type === 'Percent' && g.cap !== '' && !(Number(g.cap) > 0)) e.cap = 'Leave empty or above zero.';
+  if (!g.start || !g.end) e.end = 'Pick both dates.';
+  else if (g.end < g.start) e.end = 'The end date cannot be before the start date.';
   return e;
 }
 
-function publishOffer() {
+async function publishOffer() {
   const g = state.g;
-  const code = g.code.trim().toUpperCase();
   setState({ gTouched: true });
-  if (Object.keys(offerErrors(g)).length) return say('Fix the offer fields to publish.');
-  const offer = { code, type: g.type === 'code' ? 'percent' : g.type, value: Number(g.value), event: g.event, cap: Number(g.cap) || 0, used: 0, featured: g.type !== 'code' && g.featured, active: true };
-  setState(s => ({ offers: s.offers.concat([offer]), gTouched: false, oview: 'dash', g: Object.assign({}, s.g, { code: '' }) }));
-  say(code + ' is live — redeemable at checkout' + (offer.featured ? ' and featured in the carousel.' : '.'));
+  if (Object.keys(offerErrors(g)).length) return say('Fix the promotion fields to publish.');
+  const body = { coupon_code: g.code.trim().toUpperCase(), discount_type: g.type, start_date: g.start, end_date: g.end };
+  if (g.type === 'Amount') body.discount_amount = Number(g.value);
+  else Object.assign(body, { discount_percent: Number(g.value), max_discount_cap: g.cap === '' ? undefined : Number(g.cap) });
+  try {
+    await api('POST', '/promotions', body);
+    setState({ g: blankOffer(), gTouched: false });
+    load('promos');
+    say(body.coupon_code + ' is live from ' + dayLabel(g.start + 'T00:00') + ' to ' + dayLabel(g.end + 'T00:00') + '.');
+  } catch (err) { fail(err); }
+}
+
+/* — administrator — */
+
+async function verifyOrganizer(id, status) {
+  try {
+    await api('PATCH', `/organizers/${id}/verification`, { verification_status: status });
+    say(status === 'Verified' ? 'Verified — this organizer can now create events (BR13).' : 'Organizer marked ' + status + '.');
+  } catch (err) { fail(err); }
+  load('organizers');
+}
+
+async function addOrganizer() {
+  const f = state.orgForm;
+  if (!f.organizer_name.trim() || !EMAIL_RE.test(f.contact_email.trim())) return say('Give a name and a valid contact email.');
+  try {
+    await api('POST', '/organizers', f);
+    setState({ orgForm: { organizer_name: '', contact_email: '' } });
+    say('Registered as Pending — verify it before it creates events (BR13).');
+  } catch (err) { fail(err); }
+  load('organizers');
+}
+
+async function saveUser() {
+  const u = state.editUser;
+  try {
+    await api('PATCH', '/users/' + u.user_id, { full_name: u.full_name, email: u.email, phone_number: u.phone_number || null });
+    setState({ editUser: null });
+    say('User #' + u.user_id + ' updated.');
+  } catch (err) { fail(err); }
+  load('users');
+}
+
+async function removeEvent(id) {
+  try {
+    await api('DELETE', '/events/' + id);
+    say('Event removed.');
+  } catch (err) { fail(err); }
+  load('allEvents');
 }
 
 /* ───────────────────────── style helpers ───────────────────────── */
@@ -304,775 +534,808 @@ function seg(active) {
 function pill(kind) {
   const map = {
     ok: 'var(--color-accent-800);color:var(--color-accent-100)',
+    wait: 'var(--color-accent-2-800);color:var(--color-accent-2-100)',
     quiet: 'var(--color-neutral-900);color:var(--color-neutral-400)'
   };
-  return 'padding:3px 9px;border-radius:999px;font-size:10.5px;font-family:var(--font-heading);font-weight:500;background:' + (map[kind] || map.quiet);
+  return 'padding:3px 9px;border-radius:999px;font-size:10.5px;font-family:var(--font-heading);font-weight:500;white-space:nowrap;background:' + (map[kind] || map.quiet);
 }
+// Every status value in the schema (BR14) gets one of three looks.
+const STATUS_KIND = {
+  Paid: 'ok', Sold: 'ok', Successful: 'ok', Verified: 'ok', On_sale: 'ok', Available: 'ok',
+  Pending: 'wait', Locked: 'wait', Draft: 'wait'
+};
+const statusPill = s => html`<span style="${pill(STATUS_KIND[s] || 'quiet')}">${String(s).replace('_', ' ')}</span>`;
 function card(active) {
   return 'text-align:left;cursor:pointer;padding:var(--space-4) var(--space-6);border-radius:var(--radius-md);display:flex;flex-direction:column;gap:3px;' +
     (active ? 'border:1px solid var(--color-accent);background:color-mix(in srgb, var(--color-accent) 12%, transparent)' : 'border:1px solid var(--color-neutral-800);background:var(--color-surface)');
 }
+const bd = err => err ? 'var(--color-accent-500)' : 'var(--color-neutral-800)';
+const PANEL = 'display:flex;flex-direction:column;gap:var(--space-4);padding:var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-lg);background:var(--color-surface);box-shadow:var(--shadow-md)';
+const BOX = 'padding:var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-md);background:var(--color-surface)';
+const EMPTY = 'padding:var(--space-8);border:1px dashed var(--color-neutral-800);border-radius:var(--radius-md);text-align:center;font-size:13px;color:var(--color-neutral-500)';
+const NOTE = 'padding:var(--space-4);border:1px dashed var(--color-neutral-800);border-radius:var(--radius-md);font-size:11.5px;line-height:1.6;color:var(--color-neutral-500)';
+const MONO = 'font-family:ui-monospace,Menlo,monospace';
 
-/* ─────────────── view model: everything the markup reads ─────────────── */
-
-function viewModel() {
-  const S = state, ev = findEvent(S.holdEvent && (S.view === 'seats' || S.view === 'checkout') ? S.holdEvent : S.eventId);
-  const left = holdLeft();
-  if (S.holdStart && left === 0) setTimeout(() => { if (holdLeft() === 0 && state.holdStart) expire(); }, 0);
-  const m = money(ev);
-  const errs = S.touched ? validCheckout() : {};
-  const nErr = S.nTouched ? eventErrors(S.n) : {};
-  const gErr = S.gTouched ? offerErrors(S.g) : {};
-  const bd = c => c ? 'var(--color-accent-500)' : 'var(--color-neutral-800)';
-  const set = (key, field, transform = v => v) => e => setState({ [key]: Object.assign({}, state[key], { [field]: transform(e.target.value) }) });
-
-  const feat = featured();
-  const pi = Math.min(S.promo, Math.max(0, feat.length - 1));
-  const po = feat[pi];
-  const poEvent = po && po.event !== 'all' ? findEvent(po.event) : null;
-  const attendeeEvents = S.events.filter(e => {
-    const q = S.query.trim().toLowerCase();
-    const okQ = !q || (e.title + ' ' + e.venue + ' ' + e.cat).toLowerCase().includes(q);
-    const okC = S.cat === 'All' || e.cat === S.cat;
-    return okQ && okC;
-  });
-  const cats = ['All'].concat(Array.from(new Set(S.events.map(e => e.cat))));
-  const mineOrders = S.orders;
-
-  const rows = [];
-  for (let r = 0; r < ev.rows; r++) {
-    const tier = tierOf(ev, r), seats = [];
-    for (let c = 0; c < ev.cols; c++) {
-      const key = r + '-' + c, sold = seatSold(ev, r, c), held = !sold && seatHeldByOther(ev, r, c), mineSeat = S.selected.includes(key);
-      seats.push({
-        onClick: () => pickSeat(ev, r, c),
-        title: L[r] + '-' + (c + 1) + ' · ' + tier.name + ' · ' + euro(seatPrice(ev, r)) + (sold ? ' · sold' : held ? ' · on hold' : ''),
-        cursor: sold || held ? 'not-allowed' : 'pointer',
-        fill: mineSeat ? 'var(--color-accent)' : sold ? 'var(--color-neutral-800)' : held ? 'var(--color-accent-800)' : 'transparent',
-        border: mineSeat ? 'var(--color-accent)' : sold ? 'var(--color-neutral-800)' : held ? 'var(--color-accent-700)' : 'var(--color-neutral-600)'
-      });
-    }
-    rows.push({ label: L[r], tierMark: tier.mark, seats });
-  }
-
-  const holdsStarted = S.baseHolds + S.startedHolds, expiredTotal = S.baseExpired + S.expiredHolds;
-  const started = S.baseStarted + S.paymentsStarted, paid = S.basePaid + S.orders.length;
-  const barSeed = [40, 62, 55, 78, 96, 120, 88, 70, 104, 132, 118, 94, 140, 126];
-  const mySold = S.events.filter(e => e.mine).reduce((t, e) => t + soldCount(e), 0);
-  const revenue = S.orders.reduce((t, o) => t + o.total, 0);
-
-  return {
-    holdLabel: CONFIG.holdMinutes + ' minutes',
-    roleTag: S.role === 'organizer' ? 'Host' : 'Attend',
-    isAttendee: S.role === 'attendee', isOrganizer: S.role === 'organizer',
-    setAttendee: () => setState({ role: 'attendee', view: S.view === 'browse' ? 'browse' : S.view }),
-    setOrganizer: () => setState({ role: 'organizer' }),
-    segAttendee: seg(S.role === 'attendee'), segOrganizer: seg(S.role === 'organizer'),
-    signedIn: !!S.user, signedOut: !S.user,
-    initials: S.user ? S.user.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase() : '',
-    signOut: () => { setState({ user: null }); say('Signed out.'); },
-    toast: S.toast,
-
-    query: S.query, setQuery: e => setState({ query: e.target.value }),
-    resultCount: attendeeEvents.length + ' of ' + S.events.length + ' events',
-    noResults: attendeeEvents.length === 0,
-    clearFilters: () => setState({ query: '', cat: 'All' }),
-    cats: cats.map(c => ({ label: c, style: chip(S.cat === c), onClick: () => setState({ cat: c }) })),
-
-    vBrowse: S.role === 'attendee' && S.view === 'browse',
-    vEvent: S.role === 'attendee' && S.view === 'event',
-    vSeats: S.role === 'attendee' && S.view === 'seats',
-    vCheckout: S.role === 'attendee' && S.view === 'checkout',
-    vConfirm: S.role === 'attendee' && S.view === 'confirm',
-    vMine: S.role === 'attendee' && S.view === 'mine',
-    vAuth: S.role === 'attendee' && S.view === 'auth',
-    vLogin: S.role === 'attendee' && S.view === 'login',
-    vODash: S.role === 'organizer' && S.oview === 'dash',
-    vOCreate: S.role === 'organizer' && S.oview === 'create',
-    vOOffer: S.role === 'organizer' && S.oview === 'offer',
-    vOStats: S.role === 'organizer' && S.oview === 'stats',
-    goBrowse: () => setState({ role: 'attendee', view: 'browse' }),
-    goEvent: () => go('event'), goSeats: () => go('seats'),
-    goCheckout: () => {
-      if (!S.selected.length) return say('Pick at least one seat.');
-      setState({ view: 'checkout', f: Object.assign({}, S.f, { name: S.f.name || (S.user ? S.user.name : ''), email: S.f.email || (S.user ? S.user.email : '') }) });
-    },
-    goMine: () => setState({ role: 'attendee', view: 'mine' }), goAuth: () => setState({ role: 'attendee', view: 'auth' }),
-    goLogin: () => setState({ role: 'attendee', view: 'login' }),
-    oDash: () => setState({ role: 'organizer', oview: 'dash' }), oCreate: () => setState({ role: 'organizer', oview: 'create' }),
-    oOffer: () => setState({ role: 'organizer', oview: 'offer' }), oStats: () => setState({ role: 'organizer', oview: 'stats' }),
-    navDash: navBtn(S.oview === 'dash'), navCreate: navBtn(S.oview === 'create'), navOffer: navBtn(S.oview === 'offer'), navStats: navBtn(S.oview === 'stats'),
-
-    holdActive: !!S.holdStart, timer: Math.floor(left / 60000) + ':' + String(Math.floor(left / 1000) % 60).padStart(2, '0'),
-    timerPct: Math.round(left / holdMs() * 100) + '%',
-    holdCopy: S.selected.length + (S.selected.length === 1 ? ' seat is' : ' seats are') + ' locked to you — completing payment makes the reservation permanent.',
-    releaseHold: () => { setState({ selected: [], holdStart: 0, appliedCode: null }); say('Hold released, seats back on sale.'); },
-
-    promo: po ? {
-      kicker: po.type === 'percent' ? po.value + '% off' : euro(po.value) + ' off',
-      title: (po.type === 'percent' ? po.value + '% off ' : euro(po.value) + ' off ') + (poEvent ? poEvent.title : 'everything we host'),
-      body: poEvent ? poEvent.venue + ' · ' + whenLabel(poEvent) + '. Applied automatically when you pick a seat.' : 'Works on any event in the marketplace. Enter the code at checkout.',
-      code: po.code, cta: poEvent ? 'See the event' : 'Browse events',
-      expiry: po.cap > 0 ? (po.cap - po.used) + ' of ' + po.cap + ' redemptions left' : 'no redemption cap',
-      imgLabel: 'promo artwork',
-      onOpen: () => poEvent ? openEvent(poEvent.id) : setState({ view: 'browse' }),
-      onCopy: () => { setState({ code: po.code }); say(po.code + ' copied into the checkout field.'); }
-    } : { kicker: '', title: 'No offers running', body: 'Publish one from the Host side.', code: '—', cta: 'Browse', expiry: '', imgLabel: '', onOpen: () => setState({ view: 'browse' }), onCopy: () => {} },
-    promoDots: feat.map((o, i) => ({ w: i === pi ? '18px' : '6px', bg: i === pi ? 'var(--color-accent)' : 'var(--color-neutral-800)', onClick: () => setState({ promo: i }) })),
-    promoPrev: () => setState({ promo: (pi - 1 + feat.length) % feat.length }),
-    promoNext: () => setState({ promo: (pi + 1) % feat.length }),
-
-    listing: attendeeEvents.map(e => {
-      const o = autoOffer(e) || S.offers.find(x => x.active && x.event === 'all');
-      const sold = soldCount(e);
-      return {
-        onOpen: () => openEvent(e.id), title: e.title, venue: e.venue, when: whenLabel(e),
-        priceLabel: 'from ' + euro(Math.round(e.price * 0.7)), seatsLeft: (capacity(e) - sold) + ' seats left',
-        deal: o ? (o.type === 'percent' ? '−' + o.value + '%' : euro(o.value) + ' off') : '', imgLabel: e.cat
-      };
-    }),
-
-    ev: (() => {
-      const o = autoOffer(ev), sold = soldCount(ev);
-      return {
-        title: ev.title, cat: ev.cat, venue: ev.venue, about: ev.about,
-        meta: whenLabel(ev) + ' · ' + ev.venue,
-        deal: !!o, dealCopy: o ? (o.type === 'percent' ? o.value + '% off with ' + o.code : euro(o.value) + ' off with ' + o.code) : '',
-        imgLabel: ev.cat + ' · hero image',
-        tiers: [
-          { name: 'Premium — front rows', note: 'Rows A–B, closest to the stage', price: euro(Math.round(ev.price * 1.6)) },
-          { name: 'General — stalls', note: 'Reserved seat, main floor', price: euro(ev.price) },
-          { name: 'Gallery', note: 'Rear rows, restricted view', price: euro(Math.round(ev.price * 0.7)) }
-        ],
-        fromLabel: 'from ' + euro(Math.round(ev.price * 0.7)), fromNote: 'per seat, before fees',
-        seatsLeft: (capacity(ev) - sold) + ' of ' + capacity(ev) + ' seats available',
-        host: ev.mine ? 'Ribeira Collective' : 'Norte Eventos',
-        hostMeta: ev.mine ? '31 events hosted · replies within a day' : '112 events hosted · verified organizer'
-      };
-    })(),
-
-    seatRows: rows, noneSelected: S.selected.length === 0,
-    picked: S.selected.map(k => {
-      const [r, c] = k.split('-').map(Number);
-      return { label: 'Seat ' + seatLabel(ev, k), tier: tierOf(ev, r).name, price: euro(seatPrice(ev, r)), onRemove: () => pickSeat(ev, r, c) };
-    }),
-    seatsLabel: S.selected.length + ' × seat (' + S.selected.map(k => seatLabel(ev, k)).join(', ') + ')',
-    sub: { label: S.selected.length + (S.selected.length === 1 ? ' seat' : ' seats'), value: euro(m.sub) },
-    hasDiscount: m.disc > 0, discountLabel: m.offer ? m.offer.code + (m.offer.type === 'percent' ? ' (−' + m.offer.value + '%)' : ' (−' + euro(m.offer.value) + '/seat)') : '',
-    discountValue: '−' + euro(m.disc), feeValue: euro(m.fee), totalValue: euro(m.total),
-    holdHint: S.holdStart ? 'The hold does not renew — leaving this page keeps the timer running.' : 'Your ' + CONFIG.holdMinutes + '-minute hold starts with your first seat.',
-
-    f: S.f, code: S.code, err: Object.assign({
-      nameBorder: bd(errs.name), emailBorder: bd(errs.email), cardBorder: bd(errs.card), expBorder: bd(errs.exp), cvcBorder: bd(errs.cvc),
-      codeBorder: bd(S.codeMsg && !S.codeOk), authBorder: bd(S.authTouched && !EMAIL_RE.test(S.a.email)),
-      auth: S.authTouched && !EMAIL_RE.test(S.a.email) ? 'Enter a valid email.' : '',
-      loginEmailBorder: bd(S.loginTouched && !EMAIL_RE.test(S.l.email)),
-      loginEmail: S.loginTouched && !EMAIL_RE.test(S.l.email) ? 'Enter a valid email.' : '',
-      loginPasswordBorder: bd(S.loginTouched && !S.l.password),
-      loginPassword: S.loginTouched && !S.l.password ? 'Enter your password.' : '',
-      nTitleBorder: bd(nErr.nTitle), nVenueBorder: bd(nErr.nVenue), nDateBorder: bd(nErr.nDate), nPriceBorder: bd(nErr.nPrice),
-      gCodeBorder: bd(gErr.gCode), gValueBorder: bd(gErr.gValue)
-    }, errs, nErr, gErr),
-    setName: set('f', 'name'), setEmail: set('f', 'email'), setCard: set('f', 'card'), setExp: set('f', 'exp'), setCvc: set('f', 'cvc'),
-    setCode: e => setState({ code: e.target.value, codeMsg: '' }),
-    applyCode: () => {
-      const res = offerFor(ev, S.code);
-      if (!res) return setState({ appliedCode: null, codeMsg: 'No live offer with that code.', codeOk: false });
-      if (res.err) return setState({ appliedCode: null, codeMsg: res.err, codeOk: false });
-      setState({ appliedCode: res.offer.code, codeOk: true, codeMsg: '✓ ' + res.offer.code + ' applied — ' + (res.offer.type === 'percent' ? res.offer.value + '% off the seat price' : euro(res.offer.value) + ' off each seat') });
-    },
-    codeMsg: S.codeMsg, codeMsgColor: S.codeOk ? 'var(--color-accent-300)' : 'var(--color-neutral-400)',
-    liveCodes: S.offers.filter(o => o.active).map(o => o.code).join(' · '),
-    paying: S.paying, payLabel: S.paying ? 'Processing…' : 'Pay ' + euro(m.total) + ' & confirm',
-    pay,
-
-    conf: (() => {
-      const o = S.lastOrder;
-      if (!o) return { headline: 'Reserved', email: '', title: '', when: '', seats: '', venue: '', ref: '', admissions: '' };
-      const e = findEvent(o.eventId);
-      return { headline: 'Reserved — ' + o.seats + ' ' + (o.seatKeys.length > 1 ? 'are' : 'is') + ' yours', email: o.email, title: e.title, when: whenLabel(e), seats: o.seats, venue: e.venue, ref: o.id, admissions: 'Ticket · ' + o.seatKeys.length + ' admission' + (o.seatKeys.length > 1 ? 's' : '') };
-    })(),
-    toastCal: () => say('Calendar file downloaded (prototype).'),
-    toastPdf: () => say('PDF ticket downloaded (prototype).'),
-
-    mineTabs: [
-      { label: 'Upcoming · ' + mineOrders.length, style: chip(S.mineTab === 'upcoming'), onClick: () => setState({ mineTab: 'upcoming' }) },
-      { label: 'Expired holds · ' + S.expired.length, style: chip(S.mineTab === 'expired'), onClick: () => setState({ mineTab: 'expired' }) }
-    ],
-    mineList: S.mineTab === 'upcoming'
-      ? mineOrders.map(o => { const e = findEvent(o.eventId); return { title: e.title, when: whenLabel(e) + ' · ' + e.venue, seats: 'Seats ' + o.seats + ' · order ' + o.id, status: 'Confirmed', pill: pill('ok'), total: euro(o.total), action: 'View ticket', onAction: () => setState({ lastOrder: o, view: 'confirm' }) }; })
-      : S.expired.map(x => { const e = findEvent(x.eventId); return { title: e.title, when: whenLabel(e) + ' · ' + e.venue, seats: 'Held ' + x.seats + ' — released after ' + CONFIG.holdMinutes + ' min', status: 'Hold expired', pill: pill('quiet'), total: '—', action: 'Try again', onAction: () => openEvent(x.eventId) }; }),
-    mineEmpty: (S.mineTab === 'upcoming' ? mineOrders.length : S.expired.length) === 0,
-    hasOrders: mineOrders.length > 0, noOrders: mineOrders.length === 0, orderCount: mineOrders.length,
-
-    a: S.a, setAuthName: set('a', 'name'), setAuthEmail: set('a', 'email'),
-    doSignIn: () => {
-      setState({ authTouched: true });
-      if (!EMAIL_RE.test(S.a.email)) return say('That email does not look right.');
-      setState({ user: { name: S.a.name.trim() || 'Guest attendee', email: S.a.email.trim() }, view: 'browse', authTouched: false });
-      say('Signed in — your details will prefill at checkout.');
-    },
-
-    // Prototype only: the password is not checked against anything yet.
-    l: S.l, setLoginEmail: set('l', 'email'), setLoginPassword: set('l', 'password'),
-    doLogIn: () => {
-      setState({ loginTouched: true });
-      if (!EMAIL_RE.test(S.l.email) || !S.l.password) return say('Check the highlighted fields.');
-      const email = S.l.email.trim();
-      const name = email.split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-      setState({ user: { name, email }, view: 'browse', loginTouched: false, l: { email: '', password: '' } });
-      say('Logged in — welcome back, ' + name + '.');
-    },
-
-    orgName: 'Ribeira Collective',
-    kpis: [
-      { label: 'Seats sold', value: String(mySold), note: 'across ' + S.events.filter(e => e.mine).length + ' live events' },
-      { label: 'Prototype revenue', value: euro(revenue), note: S.orders.length + ' order' + (S.orders.length === 1 ? '' : 's') + ' this session' },
-      { label: 'Offer redemptions', value: String(S.offers.reduce((t, o) => t + o.used, 0)), note: S.offers.filter(o => o.active).length + ' codes live' },
-      { label: 'Holds expiring', value: Math.round(expiredTotal / holdsStarted * 100) + '%', note: 'unpaid after the window' }
-    ],
-    myEvents: S.events.filter(e => e.mine).map(e => {
-      const sold = soldCount(e), pct = Math.round(sold / capacity(e) * 100);
-      return {
-        id: e.id, title: e.title, when: whenLabel(e), state: 'Published', pill: pill('ok'),
-        soldCopy: sold + ' of ' + capacity(e) + ' seats sold', pctLabel: pct + '%', pct: pct + '%',
-        holdCopy: (S.holdStart && S.holdEvent === e.id ? S.selected.length : 0) + ' seats on hold right now',
-        onPreview: () => openEvent(e.id), onOffer: () => setState({ role: 'organizer', oview: 'offer', g: Object.assign({}, S.g, { event: e.id }) })
-      };
-    }),
-    offerList: S.offers.map(o => ({
-      code: o.code, detail: (o.type === 'percent' ? o.value + '% off' : euro(o.value) + ' off') + ' · ' + (o.event === 'all' ? 'all events' : findEvent(o.event).title.slice(0, 22)) + (o.featured ? ' · featured' : ''),
-      used: o.cap > 0 ? o.used + '/' + o.cap : String(o.used),
-      toggleLabel: o.active ? 'Pause' : 'Resume',
-      onToggle: () => { setState(s => ({ offers: s.offers.map(x => x.code === o.code ? Object.assign({}, x, { active: !x.active }) : x) })); say(o.code + (o.active ? ' paused — no longer redeemable.' : ' resumed.')); }
-    })),
-    orderRows: S.orders.slice().reverse().map(o => ({ buyer: o.buyer || 'Guest', event: findEvent(o.eventId).title, seats: o.seats, code: o.code, total: euro(o.total), status: o.status, pill: pill('ok') })),
-
-    n: S.n, catOptions: ['Live music', 'Conference', 'Sports', 'Comedy', 'Workshop', 'Community'],
-    setNTitle: set('n', 'title'), setNCat: set('n', 'cat'), setNVenue: set('n', 'venue'), setNDate: set('n', 'date'),
-    setNTime: set('n', 'time'), setNAbout: set('n', 'about'), setNPrice: set('n', 'price'), setNRows: set('n', 'rows'), setNCols: set('n', 'cols'),
-    holdOptions: [5, 10, 15].map(h => ({ label: h + ' min', style: seg(S.n.hold === h), onClick: () => setState({ n: Object.assign({}, S.n, { hold: h }) }) })),
-    publishEvent,
-    resetEvent: () => setState({ n: { title: '', cat: 'Live music', venue: '', date: '', time: '20:30', about: '', price: '38', rows: '8', cols: '16', hold: 5 }, nTouched: false }),
-    preview: {
-      when: S.n.date ? whenLabel({ date: S.n.date, time: S.n.time || '20:00' }) : 'date not set',
-      title: S.n.title.trim() || 'Untitled event', venue: S.n.venue.trim() || 'Venue not set',
-      price: 'from ' + euro(Math.round((Number(S.n.price) || 0) * 0.7)),
-      capacity: ((Number(S.n.rows) || 0) * (Number(S.n.cols) || 0)) + ' seats'
-    },
-
-    g: S.g, valueLabel: S.g.type === 'fixed' ? 'Amount off per seat (€)' : 'Percent off (%)',
-    offerTypes: [
-      { key: 'percent', label: 'Percent off', note: 'a share of the seat price' },
-      { key: 'fixed', label: 'Fixed amount', note: 'euros off each seat' },
-      { key: 'code', label: 'Promo code only', note: 'hidden from the carousel' }
-    ].map(t => ({ label: t.label, note: t.note, style: card(S.g.type === t.key), onClick: () => setState({ g: Object.assign({}, S.g, { type: t.key, featured: t.key === 'code' ? false : S.g.featured }) }) })),
-    setGValue: set('g', 'value'), setGCode: set('g', 'code', v => v.toUpperCase()), setGCap: set('g', 'cap'), setGEvent: set('g', 'event'),
-    toggleFeatured: () => setState({ g: Object.assign({}, S.g, { featured: !S.g.featured }) }),
-    featuredStyle: 'display:flex;align-items:center;gap:var(--space-4);padding:var(--space-4) var(--space-6);border-radius:var(--radius-md);cursor:pointer;background:transparent;border:1px solid ' + (S.g.featured ? 'var(--color-accent)' : 'var(--color-neutral-800)'),
-    featuredBox: 'width:16px;height:16px;flex:none;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:10px;border:1px solid ' + (S.g.featured ? 'var(--color-accent)' : 'var(--color-neutral-700)') + ';background:' + (S.g.featured ? 'var(--color-accent)' : 'transparent') + ';color:' + (S.g.featured ? 'var(--color-accent-900)' : 'transparent'),
-    publishOffer,
-    gPreview: (() => {
-      const base = 90, v = Number(S.g.value) || 0;
-      const d = S.g.type === 'fixed' ? Math.min(base, v * 2) : base * v / 100;
-      return {
-        title: (S.g.type === 'fixed' ? euro(v) + ' off' : v + '% off') + ' ' + (S.g.event === 'all' ? 'every event we host' : findEvent(S.g.event).title),
-        body: 'Code ' + (S.g.code.trim() || '—') + ' · ' + ((Number(S.g.cap) || 0) > 0 ? S.g.cap + ' redemptions' : 'no cap'),
-        base: euro(base), lineLabel: (S.g.code.trim() || 'CODE') + (S.g.type === 'fixed' ? ' (−' + euro(v) + '/seat)' : ' (−' + v + '%)'),
-        lineValue: '−' + euro(d), total: euro(Math.max(0, base - d) + CONFIG.serviceFee * 2)
-      };
-    })(),
-
-    bars: barSeed.map((h, i) => {
-      const isToday = i === barSeed.length - 1;
-      const extra = isToday ? S.orders.reduce((t, o) => t + o.seatKeys.length, 0) * 6 : 0;
-      return { h: Math.min(170, h + extra) + 'px', fill: i % 3 === 1 || (isToday && S.orders.some(o => o.code !== '—')) ? 'var(--color-accent)' : 'var(--color-neutral-800)', title: (h + extra) + ' seats' };
-    }),
-    funnel: [
-      { label: 'Seat selected', value: String(holdsStarted + 338), pct: '100%' },
-      { label: 'Held (' + CONFIG.holdMinutes + ' min)', value: String(holdsStarted), pct: Math.round(holdsStarted / (holdsStarted + 338) * 100) + '%' },
-      { label: 'Payment started', value: String(started), pct: Math.round(started / (holdsStarted + 338) * 100) + '%' },
-      { label: 'Paid — permanent', value: String(paid), pct: Math.round(paid / (holdsStarted + 338) * 100) + '%' }
-    ],
-    funnelNote: Math.round(expiredTotal / holdsStarted * 100) + '% of holds expire unpaid — the ' + CONFIG.holdMinutes + '-minute window is where the drop-off sits.',
-    offerPerf: S.offers.map(o => ({
-      code: o.code, type: o.type === 'percent' ? 'Percent' : 'Fixed', redeemed: String(o.used),
-      given: o.type === 'percent' ? euro(o.used * 18) : euro(o.used * o.value), net: o.used ? euro(o.used * 52) : '—'
-    }))
-  };
-}
+// Update one field of a nested form object in state.
+const set = (key, field, transform = v => v) => e => setState({ [key]: Object.assign({}, state[key], { [field]: transform(e.target.value) }) });
 
 /* ───────────────────────────── markup ───────────────────────────── */
 
 const fieldError = msg => msg ? html`<div style="font-size:11.5px;color:var(--color-accent-300);margin-top:4px">${msg}</div>` : '';
-const MONO = 'font-family:ui-monospace,Menlo,monospace';
+const field = (label, value, onInput, o = {}) => html`
+<div class="field"><label>${label}</label><input value="${value}" data-input="${onInput}" class="input" type="${o.type || 'text'}" placeholder="${o.placeholder || ''}" ${o.min ? html`min="${o.min}"` : ''} style="border-color:${bd(o.error)};${o.style || ''}">${fieldError(o.error)}</div>`;
+const h1 = (title, sub) => html`<div style="display:flex;flex-direction:column;gap:4px"><h1 style="font-size:28px;margin:0">${title}</h1>${sub ? html`<div style="font-size:13px;color:var(--color-neutral-400)">${sub}</div>` : ''}</div>`;
+const kpi = (label, value, note) => html`
+<div style="${BOX};display:flex;flex-direction:column;gap:5px"><h6 style="margin:0;color:var(--color-neutral-500)">${label}</h6><div style="font-family:var(--font-heading);font-weight:500;font-size:26px">${value}</div><div style="font-size:11.5px;color:var(--color-accent-300)">${note}</div></div>`;
+const bar = (pct, fill = 'var(--color-accent)') => html`<div style="height:5px;border-radius:3px;background:var(--color-neutral-900);overflow:hidden"><div style="height:100%;background:${fill};width:${pct}%"></div></div>`;
+const ruleTag = id => html`<span class="tag tag-outline" style="font-size:10px;padding:1px 7px">${id}</span>`;
 
-function header(v) {
+function header() {
+  const S = state, user = currentUser();
+  const roleTag = { customer: 'Attend', organizer: 'Host', manager: 'Manage', admin: 'Admin' }[S.role];
+  const pending = S.mine.filter(b => b.booking_status === 'Pending').length;
+  const nav = (role, items) => html`
+  <div style="flex:1;display:flex;align-items:center;gap:var(--space-2);min-width:0;overflow:auto">
+    ${items.map(([key, label]) => html`<button data-click="${() => go(role, key)}" style="${navBtn(!S.rules && S[VIEW_KEY[role]] === key)}">${label}</button>`)}
+  </div>`;
+  const hold = S.role === 'customer' && S.booking && S.booking.booking_status === 'Pending';
+  const left = Math.max(0, S.deadline - S.now);
   return html`
 <div data-key="nav" style="position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:var(--space-6);padding:var(--space-4) var(--space-8);background:color-mix(in srgb, var(--color-bg) 88%, transparent);backdrop-filter:blur(10px);border-bottom:1px solid var(--color-divider)">
-  <button data-click="${v.goBrowse}" style="display:flex;align-items:baseline;gap:6px;border:0;background:none;cursor:pointer;padding:0;font-family:var(--font-heading);font-weight:500;font-size:17px;letter-spacing:-.02em;color:var(--color-text)">Gather<span style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--color-accent)">${v.roleTag}</span></button>
-  ${v.isAttendee ? html`
+  <button data-click="${() => go('customer', 'browse')}" style="display:flex;align-items:baseline;gap:6px;border:0;background:none;cursor:pointer;padding:0;font-family:var(--font-heading);font-weight:500;font-size:17px;letter-spacing:-.02em;color:var(--color-text)">Bookify<span style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--color-accent)">${roleTag}</span></button>
+  ${S.role === 'customer' ? html`
   <div style="flex:1;display:flex;align-items:center;gap:var(--space-4);min-width:0">
-    <input value="${v.query}" data-input="${v.setQuery}" placeholder="Search events, venues, cities" class="input" style="flex:1;min-width:0;max-width:420px;font-size:13px">
-    <button data-click="${v.goBrowse}" class="btn btn-ghost" style="font-size:13px">Browse</button>
-    <button data-click="${v.goMine}" class="btn btn-ghost" style="font-size:13px">Reservations ${v.hasOrders ? html`<span class="tag tag-accent" style="margin-left:5px;font-size:10px">${v.orderCount}</span>` : ''}</button>
+    <input value="${S.query}" data-input="${e => { setState({ query: e.target.value }); if (S.view !== 'browse' || S.rules) go('customer', 'browse'); }}" placeholder="Search events, venues, organizers" class="input" style="flex:1;min-width:0;max-width:420px;font-size:13px">
+    <button data-click="${() => go('customer', 'browse')}" class="btn btn-ghost" style="font-size:13px">Browse</button>
+    <button data-click="${() => go('customer', 'mine')}" class="btn btn-ghost" style="font-size:13px">Reservations ${pending ? html`<span class="tag tag-accent" style="margin-left:5px;font-size:10px">${pending}</span>` : ''}</button>
   </div>` : ''}
-  ${v.isOrganizer ? html`
-  <div style="flex:1;display:flex;align-items:center;gap:var(--space-2);min-width:0;overflow:auto">
-    <button data-click="${v.oDash}" style="${v.navDash}">Dashboard</button>
-    <button data-click="${v.oCreate}" style="${v.navCreate}">Host an event</button>
-    <button data-click="${v.oOffer}" style="${v.navOffer}">Offers</button>
-    <button data-click="${v.oStats}" style="${v.navStats}">Analytics</button>
-  </div>` : ''}
+  ${S.role === 'organizer' ? nav('organizer', [['dash', 'Dashboard'], ['create', 'Create event'], ['offer', 'Promotions']]) : ''}
+  ${S.role === 'manager' ? nav('manager', [['sales', 'Sales'], ['seats', 'Seat status'], ['usage', 'Promotion usage'], ['holds', 'Holds']]) : ''}
+  ${S.role === 'admin' ? nav('admin', [['organizers', 'Organizers'], ['users', 'Users'], ['events', 'Events']]) : ''}
   <div style="display:flex;align-items:center;gap:var(--space-3)">
+    <button data-click="${() => { setState({ rules: true }); window.scrollTo(0, 0); }}" style="${navBtn(S.rules)}">Rules</button>
     <div class="seg" style="font-size:12px">
-      <button data-click="${v.setAttendee}" style="${v.segAttendee}">Attend</button>
-      <button data-click="${v.setOrganizer}" style="${v.segOrganizer}">Host</button>
+      ${[['customer', 'Attend'], ['organizer', 'Host'], ['manager', 'Manage'], ['admin', 'Admin']].map(([r, label]) =>
+        html`<button data-click="${() => switchRole(r)}" style="${seg(S.role === r)}">${label}</button>`)}
     </div>
-    ${v.signedIn ? html`<div style="display:flex;align-items:center;gap:7px"><div style="width:26px;height:26px;border-radius:50%;background:var(--color-accent-800);color:var(--color-accent-200);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500">${v.initials}</div><button data-click="${v.signOut}" class="btn btn-ghost" style="font-size:12px">Sign out</button></div>` : ''}
-    ${v.signedOut ? html`<button data-click="${v.goAuth}" class="btn btn-primary" style="font-size:13px">Sign in</button>
-    <button data-click="${v.goLogin}" class="btn btn-secondary" style="font-size:13px">Log in</button>` : ''}
+    ${S.role === 'customer' && user ? html`<div style="display:flex;align-items:center;gap:7px" title="${user.full_name} · ${user.email}"><div style="width:26px;height:26px;border-radius:50%;background:var(--color-accent-800);color:var(--color-accent-200);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500">${user.full_name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}</div><button data-click="${() => go('customer', 'auth')}" class="btn btn-ghost" style="font-size:12px">Switch</button></div>` : ''}
+    ${S.role === 'customer' && !user ? html`<button data-click="${() => go('customer', 'auth')}" class="btn btn-primary" style="font-size:13px">Sign in</button>` : ''}
   </div>
 </div>
-${v.holdActive ? html`
+${hold ? html`
 <div data-key="hold" style="position:sticky;top:57px;z-index:35;display:flex;align-items:center;gap:var(--space-4);padding:var(--space-3) var(--space-8);background:var(--color-accent-900);border-bottom:1px solid var(--color-accent-700)">
-  <div style="font-family:var(--font-heading);font-weight:500;font-size:14px;color:var(--color-accent-200);font-variant-numeric:tabular-nums">${v.timer}</div>
-  <div style="flex:1;font-size:12.5px;color:var(--color-accent-300)">${v.holdCopy}</div>
-  <div style="width:180px;height:3px;border-radius:2px;background:var(--color-accent-800);overflow:hidden"><div style="height:100%;background:var(--color-accent);width:${v.timerPct}"></div></div>
-  <button data-click="${v.releaseHold}" class="btn btn-ghost" style="font-size:12px;color:var(--color-accent-300)">Release</button>
+  <div style="font-family:var(--font-heading);font-weight:500;font-size:14px;color:var(--color-accent-200);font-variant-numeric:tabular-nums">${clock(left)}</div>
+  <div style="flex:1;font-size:12.5px;color:var(--color-accent-300)">Booking #${S.booking.booking_id} · ${plural(S.booking.items.length, 'unit')} locked to you — pay ${baht(remainingOf(S.booking))} before the timer ends or they go back on sale (BR17, BR18).</div>
+  <div style="width:180px;height:3px;border-radius:2px;background:var(--color-accent-800);overflow:hidden"><div style="height:100%;background:var(--color-accent);width:${Math.round(left / (CONFIG.holdMinutes * 600))}%"></div></div>
+  ${S.view !== 'checkout' || S.rules ? html`<button data-click="${() => openBooking(S.booking.booking_id, 'checkout')}" class="btn btn-ghost" style="font-size:12px;color:var(--color-accent-200)">Pay now</button>` : ''}
+  <button data-click="${() => cancelBooking(S.booking.booking_id)}" class="btn btn-ghost" style="font-size:12px;color:var(--color-accent-300)">Release</button>
 </div>` : ''}`;
 }
 
-function browseView(v) {
+/* — customer — */
+
+function browseView() {
+  const S = state, q = S.query.trim().toLowerCase();
+  const FILTERS = {
+    'All': () => true,
+    'Seated': e => e.seated_units > 0 && !e.standing_units,
+    'Standing': e => e.standing_units > 0 && !e.seated_units,
+    'Seated + standing': e => e.seated_units > 0 && e.standing_units > 0,
+    'Has space': e => !e.is_full
+  };
+  const list = S.events.filter(e => (!q || (e.event_name + ' ' + e.venue_name + ' ' + e.organizer_name).toLowerCase().includes(q)) && FILTERS[S.filter](e));
+  const live = S.promos.filter(p => p.active_today);
+  const pi = Math.min(S.promo, Math.max(0, live.length - 1)), po = live[pi];
+  const step = d => () => setState({ promo: (pi + d + live.length) % Math.max(1, live.length) });
   return html`
 <div class="pane" data-key="browse" style="display:flex;flex-direction:column;gap:var(--space-8)">
   <div style="display:flex;align-items:stretch;gap:var(--space-4)">
-    <button data-click="${v.promoPrev}" class="btn btn-icon lift" style="align-self:center;border:1px solid var(--color-neutral-800)">‹</button>
+    <button data-click="${step(-1)}" class="btn btn-icon lift" style="align-self:center;border:1px solid var(--color-neutral-800)">‹</button>
     <div style="flex:1;min-width:0;display:flex;gap:var(--space-8);align-items:center;padding:var(--space-8);border:1px solid var(--color-accent-800);border-radius:var(--radius-lg);background:linear-gradient(100deg, var(--color-accent-900), var(--color-surface) 70%)">
       <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:var(--space-3)">
-        <div style="display:flex;align-items:center;gap:var(--space-3)"><span class="tag tag-accent" style="font-size:10px;letter-spacing:.1em;text-transform:uppercase">${v.promo.kicker}</span><span style="font-size:11.5px;color:var(--color-neutral-500)">${v.promo.expiry}</span></div>
-        <h2 style="font-size:28px;margin:0">${v.promo.title}</h2>
-        <div style="font-size:13.5px;color:var(--color-neutral-400);max-width:52ch">${v.promo.body}</div>
+        ${po ? html`
+        <div style="display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap"><span class="tag tag-accent" style="font-size:10px;letter-spacing:.1em;text-transform:uppercase">${po.discount_type} discount</span><span style="font-size:11.5px;color:var(--color-neutral-500)">valid ${dayLabel(po.start_date)} – ${dayLabel(po.end_date)} · used ${plural(po.times_used, 'time')}</span></div>
+        <h2 style="font-size:28px;margin:0">${promoLabel(po)} with ${po.coupon_code}</h2>
+        <div style="font-size:13.5px;color:var(--color-neutral-400);max-width:52ch">Works on any event while it is valid. One promotion per booking (BR8), and only inside its dates (BR22).</div>
         <div style="display:flex;align-items:center;gap:var(--space-4);margin-top:var(--space-2)">
-          <button data-click="${v.promo.onOpen}" class="btn btn-primary">${v.promo.cta}</button>
-          <button data-click="${v.promo.onCopy}" class="btn btn-secondary" style="${MONO};font-size:13px">${v.promo.code} · copy</button>
-        </div>
+          <button data-click="${() => { setState({ code: po.coupon_code }); say(po.coupon_code + ' will be used on your next booking.'); }}" class="btn btn-secondary" style="${MONO};font-size:13px">${po.coupon_code} · use it</button>
+        </div>` : html`
+        <h2 style="font-size:28px;margin:0">No promotions running today</h2>
+        <div style="font-size:13.5px;color:var(--color-neutral-400)">Organizers publish them from the Host side.</div>`}
       </div>
-      <div style="width:220px;height:130px;flex:none;border-radius:var(--radius-md);border:1px solid var(--color-neutral-800);background:linear-gradient(140deg, var(--color-section), var(--color-neutral-900));display:flex;align-items:flex-end;padding:var(--space-4);font-size:11px;color:var(--color-neutral-500)">${v.promo.imgLabel}</div>
+      <div style="width:220px;height:130px;flex:none;border-radius:var(--radius-md);border:1px solid var(--color-neutral-800);background:linear-gradient(140deg, var(--color-section), var(--color-neutral-900));display:flex;align-items:flex-end;padding:var(--space-4);font-size:11px;color:var(--color-neutral-500)">${live.length ? (pi + 1) + ' of ' + live.length + ' promotions' : 'promotions'}</div>
     </div>
-    <button data-click="${v.promoNext}" class="btn btn-icon lift" style="align-self:center;border:1px solid var(--color-neutral-800)">›</button>
+    <button data-click="${step(1)}" class="btn btn-icon lift" style="align-self:center;border:1px solid var(--color-neutral-800)">›</button>
   </div>
   <div style="display:flex;gap:6px;justify-content:center;margin-top:calc(-1 * var(--space-6))">
-    ${v.promoDots.map(d => html`<button data-click="${d.onClick}" style="width:${d.w};height:4px;border:0;border-radius:2px;padding:0;cursor:pointer;background:${d.bg}"></button>`)}
+    ${live.map((p, i) => html`<button data-click="${() => setState({ promo: i })}" style="width:${i === pi ? '18px' : '6px'};height:4px;border:0;border-radius:2px;padding:0;cursor:pointer;background:${i === pi ? 'var(--color-accent)' : 'var(--color-neutral-800)'}"></button>`)}
   </div>
 
   <div style="display:flex;flex-wrap:wrap;gap:var(--space-2);align-items:center">
-    ${v.cats.map(c => html`<button data-click="${c.onClick}" style="${c.style}">${c.label}</button>`)}
-    <div style="margin-left:auto;font-size:12px;color:var(--color-neutral-500)">${v.resultCount}</div>
+    ${Object.keys(FILTERS).map(f => html`<button data-click="${() => setState({ filter: f })}" style="${chip(S.filter === f)}">${f}</button>`)}
+    <div style="margin-left:auto;font-size:12px;color:var(--color-neutral-500)">${list.length} of ${plural(S.events.length, 'event')} on sale</div>
   </div>
 
   <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:var(--space-6)">
-    ${v.listing.map(e => html`
-    <button data-click="${e.onOpen}" class="card lift" style="text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:var(--space-3);padding:0;overflow:hidden;border:1px solid var(--color-neutral-800)">
+    ${list.map(e => html`
+    <button data-click="${() => openEvent(e.event_id)}" class="card lift" style="text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:var(--space-3);padding:0;overflow:hidden;border:1px solid var(--color-neutral-800)">
       <div style="height:120px;background:linear-gradient(135deg, var(--color-neutral-900), var(--color-section-ghost));display:flex;align-items:flex-end;justify-content:space-between;padding:var(--space-3) var(--space-4);gap:8px">
-        <span style="font-size:10.5px;color:var(--color-neutral-400)">${e.imgLabel}</span>
-        ${e.deal ? html`<span class="tag tag-accent" style="font-size:10px">${e.deal}</span>` : ''}
+        <span style="font-size:10.5px;color:var(--color-neutral-400)">${kindLabel(e)}</span>
+        ${e.is_full ? html`<span class="tag tag-neutral" style="font-size:10px">Sold out</span>` : ''}
       </div>
       <div style="padding:0 var(--space-6) var(--space-6);display:flex;flex-direction:column;gap:var(--space-2)">
-        <div class="card-kicker" style="font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-neutral-500)">${e.when}</div>
-        <div class="card-title" style="font-family:var(--font-heading);font-weight:500;font-size:16px">${e.title}</div>
-        <div style="font-size:12.5px;color:var(--color-neutral-400)">${e.venue}</div>
+        <div class="card-kicker" style="font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-neutral-500)">${whenLabel(e.event_date)}</div>
+        <div class="card-title" style="font-family:var(--font-heading);font-weight:500;font-size:16px">${e.event_name}</div>
+        <div style="font-size:12.5px;color:var(--color-neutral-400)">${e.venue_name} · ${e.organizer_name}</div>
         <div style="display:flex;align-items:baseline;gap:var(--space-3);margin-top:var(--space-2)">
-          <div style="font-family:var(--font-heading);font-weight:500;font-size:15px">${e.priceLabel}</div>
-          <div style="font-size:11.5px;color:var(--color-neutral-500)">${e.seatsLeft}</div>
+          <div style="font-family:var(--font-heading);font-weight:500;font-size:15px">from ${baht(e.price_from)}</div>
+          <div style="font-size:11.5px;color:var(--color-neutral-500)">${e.available} of ${e.units} left</div>
           <div style="margin-left:auto;font-size:12px;color:var(--color-accent)">Reserve →</div>
         </div>
       </div>
     </button>`)}
   </div>
-  ${v.noResults ? html`<div style="padding:var(--space-8);border:1px dashed var(--color-neutral-800);border-radius:var(--radius-md);text-align:center;color:var(--color-neutral-500);font-size:13px">Nothing matches that search. <button data-click="${v.clearFilters}" class="btn btn-ghost" style="font-size:13px">Clear filters</button></div>` : ''}
+  ${!list.length ? html`<div style="${EMPTY}">Nothing matches that search. <button data-click="${() => setState({ query: '', filter: 'All' })}" class="btn btn-ghost" style="font-size:13px">Clear filters</button></div>` : ''}
 </div>`;
 }
 
-function eventView(v) {
-  const ev = v.ev;
+function eventView() {
+  const ev = state.event;
+  if (!ev) return html`<div class="pane" data-key="event" style="${EMPTY}">Loading event…</div>`;
+  const zones = standingGroups(ev);
+  const onSale = ev.event_status === 'On_sale', full = ev.units > 0 && ev.sold === ev.units;
   return html`
 <div class="pane" data-key="event" style="display:flex;flex-direction:column;gap:var(--space-6)">
-  <button data-click="${v.goBrowse}" class="btn btn-ghost" style="align-self:flex-start;font-size:12.5px">← All events</button>
-  <div style="height:220px;border-radius:var(--radius-lg);border:1px solid var(--color-neutral-800);background:linear-gradient(120deg, var(--color-section), var(--color-neutral-900) 70%);display:flex;align-items:flex-end;padding:var(--space-6);font-size:11px;color:var(--color-neutral-500)">${ev.imgLabel}</div>
+  <button data-click="${() => go('customer', 'browse')}" class="btn btn-ghost" style="align-self:flex-start;font-size:12.5px">← All events</button>
+  <div style="height:220px;border-radius:var(--radius-lg);border:1px solid var(--color-neutral-800);background:linear-gradient(120deg, var(--color-section), var(--color-neutral-900) 70%);display:flex;align-items:flex-end;padding:var(--space-6);font-size:11px;color:var(--color-neutral-500)">${ev.venue_name}</div>
   <div style="display:flex;flex-wrap:wrap;gap:var(--space-8);align-items:flex-start">
     <div style="flex:1;min-width:300px;display:flex;flex-direction:column;gap:var(--space-6)">
       <div style="display:flex;flex-direction:column;gap:var(--space-3)">
-        <div style="display:flex;flex-wrap:wrap;gap:var(--space-2)">${ev.deal ? html`<span class="tag tag-accent" style="font-size:11px">${ev.dealCopy}</span>` : ''}<span class="tag tag-outline" style="font-size:11px">${ev.cat}</span></div>
-        <h1 style="font-size:34px;margin:0">${ev.title}</h1>
-        <div style="font-size:13.5px;color:var(--color-neutral-400)">${ev.meta}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:var(--space-2);align-items:center">${statusPill(ev.event_status)}<span class="tag tag-outline" style="font-size:11px">${kindLabel(ev)}</span>${full ? html`<span class="tag tag-neutral" style="font-size:11px">Sold out</span>` : ''}</div>
+        <h1 style="font-size:34px;margin:0">${ev.event_name}</h1>
+        <div style="font-size:13.5px;color:var(--color-neutral-400)">${whenLabel(ev.event_date)} · ${ev.venue_name}</div>
       </div>
-      <div style="font-size:13.5px;line-height:1.7;color:var(--color-neutral-300);max-width:64ch">${ev.about}</div>
       <div style="display:flex;flex-direction:column;gap:var(--space-3)">
-        <h4 style="font-size:15px;margin:0">Ticket tiers</h4>
-        ${ev.tiers.map(t => html`
+        <h4 style="font-size:15px;margin:0">Ticket types</h4>
+        ${ev.ticket_types.map(t => html`
         <div style="display:flex;align-items:center;gap:var(--space-4);padding:var(--space-4) var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-md);background:var(--color-surface)">
-          <div style="flex:1;min-width:0"><div style="font-family:var(--font-heading);font-weight:500;font-size:14px">${t.name}</div><div style="font-size:12px;color:var(--color-neutral-500)">${t.note}</div></div>
-          <div style="font-family:var(--font-heading);font-weight:500;font-size:15px">${t.price}</div>
+          <div style="flex:1;min-width:0"><div style="font-family:var(--font-heading);font-weight:500;font-size:14px">${t.type_name}</div><div style="font-size:12px;color:var(--color-neutral-500)">${t.description || ''} · ${t.available} of ${t.units} available</div></div>
+          <div style="font-family:var(--font-heading);font-weight:500;font-size:15px">${baht(t.price)}</div>
         </div>`)}
+        ${!ev.ticket_types.length ? html`<div style="${EMPTY}">No ticket types yet (BR11).</div>` : ''}
+      </div>
+      <div style="display:flex;flex-direction:column;gap:var(--space-3)">
+        <h4 style="font-size:15px;margin:0">Where you can be</h4>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:var(--space-3)">
+          ${ev.seated_units ? html`<div style="${BOX}"><div style="font-family:var(--font-heading);font-weight:500;font-size:13.5px">Numbered seats</div><div style="font-size:12px;color:var(--color-neutral-500)">${ev.seated_units} seats · pick your own row and seat</div></div>` : ''}
+          ${zones.map(g => html`<div style="${BOX}"><div style="font-family:var(--font-heading);font-weight:500;font-size:13.5px">${g.zone}</div><div style="font-size:12px;color:var(--color-neutral-500)">Standing · ${g.type} · ${g.free.length} of ${g.units.length} free</div></div>`)}
+        </div>
       </div>
       <div style="display:flex;gap:var(--space-4);align-items:center;padding:var(--space-4) var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-md)">
         <div style="width:36px;height:36px;border-radius:50%;background:var(--color-neutral-900);border:1px solid var(--color-neutral-800)"></div>
-        <div style="flex:1;min-width:0"><div style="font-family:var(--font-heading);font-weight:500;font-size:13.5px">${ev.host}</div><div style="font-size:12px;color:var(--color-neutral-500)">${ev.hostMeta}</div></div>
+        <div style="flex:1;min-width:0"><div style="font-family:var(--font-heading);font-weight:500;font-size:13.5px">${ev.organizer_name}</div><div style="font-size:12px;color:var(--color-neutral-500)">Verified organizer (BR13)</div></div>
       </div>
     </div>
-    <div style="width:320px;flex:none;position:sticky;top:90px;display:flex;flex-direction:column;gap:var(--space-4);padding:var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-lg);background:var(--color-surface);box-shadow:var(--shadow-md)">
-      <div style="display:flex;align-items:baseline;gap:var(--space-3)"><div style="font-family:var(--font-heading);font-weight:500;font-size:26px">${ev.fromLabel}</div><div style="font-size:12px;color:var(--color-neutral-500)">${ev.fromNote}</div></div>
+    <div style="width:320px;flex:none;position:sticky;top:90px;${PANEL}">
+      <div style="display:flex;align-items:baseline;gap:var(--space-3)"><div style="font-family:var(--font-heading);font-weight:500;font-size:26px">from ${baht(ev.price_from)}</div><div style="font-size:12px;color:var(--color-neutral-500)">per ticket</div></div>
       <div style="height:1px;background:var(--color-divider)"></div>
       <div style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--color-neutral-400)">
-        <div>${ev.seatsLeft}</div>
-        <div>Reserved seating · pick your own seats</div>
-        <div>Mobile ticket, QR entry at the door</div>
+        <div>${ev.available} available · ${ev.locked} on hold · ${ev.sold} sold</div>
+        <div>Capacity ${ev.total_capacity}</div>
+        <div>Up to ${CONFIG.freeWithoutId} tickets per booking without ID; more need each attendee’s ID (BR24)</div>
       </div>
-      <button data-click="${v.goSeats}" class="btn btn-primary btn-block">Choose seats</button>
-      <div style="font-size:11.5px;line-height:1.6;color:var(--color-neutral-500)">Seats are held for ${v.holdLabel} while you pay. The reservation becomes permanent the moment payment completes.</div>
+      <button data-click="${() => go('customer', 'seats')}" ${!onSale || full ? html`disabled` : ''} class="btn btn-primary btn-block">${!onSale ? 'Not on sale' : full ? 'Sold out' : 'Choose seats'}</button>
+      <div style="font-size:11.5px;line-height:1.6;color:var(--color-neutral-500)">Reserving locks your picks for ${CONFIG.holdMinutes} minutes while you pay. Unpaid holds return to sale automatically (BR17, BR18).</div>
     </div>
   </div>
 </div>`;
 }
 
-function totalsBlock(v, firstLabel, totalLabel, totalSize) {
-  return html`
-<div style="display:flex;flex-direction:column;gap:5px;font-size:12.5px">
-  <div style="display:flex;justify-content:space-between;color:var(--color-neutral-400)"><span>${firstLabel}</span><span>${v.sub.value}</span></div>
-  ${v.hasDiscount ? html`<div style="display:flex;justify-content:space-between;color:var(--color-accent-300)"><span>${v.discountLabel}</span><span>${v.discountValue}</span></div>` : ''}
-  <div style="display:flex;justify-content:space-between;color:var(--color-neutral-400)"><span>Service fee</span><span>${v.feeValue}</span></div>
-  <div style="display:flex;justify-content:space-between;padding-top:var(--space-3);margin-top:var(--space-2);border-top:1px solid var(--color-divider);font-family:var(--font-heading);font-weight:500;font-size:${totalSize}"><span>${totalLabel}</span><span>${v.totalValue}</span></div>
-</div>`;
-}
-
-function seatsView(v) {
+function seatsView() {
+  const S = state, ev = S.event;
+  if (!ev) return html`<div class="pane" data-key="seats" style="${EMPTY}">Loading seat map…</div>`;
+  const rows = [];
+  for (const u of ev.units) {
+    if (u.unit_kind !== 'Seated') continue;
+    let r = rows[rows.length - 1];
+    if (!r || r.label !== u.row_label) rows.push(r = { label: u.row_label, seats: [] });
+    r.seats.push(u);
+  }
+  const zones = standingGroups(ev), chosen = chosenUnits();
+  const subtotal = chosen.reduce((t, c) => t + c.price, 0);
   const legend = (style, label) => html`<div style="display:flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;${style}"></span>${label}</div>`;
+  const att = i => S.attendees[i] || { name: '', idn: '' };
+  const setAtt = (i, k) => e => setState({ attendees: Object.assign({}, S.attendees, { [i]: Object.assign({}, att(i), { [k]: e.target.value }) }) });
   return html`
 <div class="pane" data-key="seats" style="display:flex;flex-wrap:wrap;gap:var(--space-8);align-items:flex-start">
   <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:var(--space-6)">
     <div style="display:flex;align-items:center;gap:var(--space-4);flex-wrap:wrap">
-      <button data-click="${v.goEvent}" class="btn btn-ghost" style="font-size:12.5px">← ${v.ev.title}</button>
+      <button data-click="${() => go('customer', 'event')}" class="btn btn-ghost" style="font-size:12.5px">← ${ev.event_name}</button>
       <div style="margin-left:auto;display:flex;gap:var(--space-4);flex-wrap:wrap;font-size:11.5px;color:var(--color-neutral-400)">
-        ${legend('border:1px solid var(--color-neutral-600)', 'Free')}
+        ${legend('border:1px solid var(--color-neutral-600)', 'Available')}
         ${legend('background:var(--color-accent)', 'Yours')}
-        ${legend('background:var(--color-accent-800)', 'Held')}
+        ${legend('background:var(--color-accent-800)', 'Locked')}
         ${legend('background:var(--color-neutral-800)', 'Sold')}
       </div>
     </div>
+    ${rows.length ? html`
     <div style="display:flex;flex-direction:column;align-items:center;gap:var(--space-6);padding:var(--space-8) var(--space-4);border:1px solid var(--color-neutral-800);border-radius:var(--radius-lg);background:var(--color-surface);overflow:auto">
       <div style="width:min(420px,90%);height:26px;border-radius:200px 200px 0 0;border:1px solid var(--color-neutral-700);background:linear-gradient(var(--color-neutral-900),transparent);display:flex;align-items:center;justify-content:center;font-size:10.5px;letter-spacing:.2em;color:var(--color-neutral-400)">STAGE</div>
       <div style="display:flex;flex-direction:column;gap:6px">
-        ${v.seatRows.map(row => html`
+        ${rows.map(row => html`
         <div style="display:flex;align-items:center;gap:5px">
           <div style="width:16px;font-size:10px;color:var(--color-neutral-600)">${row.label}</div>
-          ${row.seats.map(s => html`<button data-click="${s.onClick}" title="${s.title}" class="seat" style="width:18px;height:16px;border-radius:3px;padding:0;cursor:${s.cursor};background:${s.fill};border:1px solid ${s.border}"></button>`)}
-          <div style="width:16px;font-size:10px;color:var(--color-neutral-600)">${row.tierMark}</div>
+          ${row.seats.map(u => {
+            const mine = S.selected.includes(u.unit_id), st = u.unit_status;
+            const fill = mine ? 'var(--color-accent)' : st === 'Sold' ? 'var(--color-neutral-800)' : st === 'Locked' ? 'var(--color-accent-800)' : 'transparent';
+            const border = mine ? 'var(--color-accent)' : st === 'Sold' ? 'var(--color-neutral-800)' : st === 'Locked' ? 'var(--color-accent-700)' : 'var(--color-neutral-600)';
+            return html`<button data-click="${() => toggleSeat(u)}" title="${unitLabel(u)} · ${u.type_name} · ${baht(priceOf(ev, u))} · ${st}" class="seat" style="width:18px;height:16px;border-radius:3px;padding:0;cursor:${st === 'Available' ? 'pointer' : 'not-allowed'};background:${fill};border:1px solid ${border}"></button>`;
+          })}
+          <div style="width:16px;font-size:10px;color:var(--color-neutral-600)">${row.seats[0].type_name[0]}</div>
         </div>`)}
       </div>
-      <div style="font-size:11.5px;color:var(--color-neutral-500)">Front rows are premium · tap a seat to add or drop it</div>
-    </div>
+      <div style="font-size:11.5px;color:var(--color-neutral-500)">Letter on the right = ticket type (V = VIP, P = Priority, N = Normal) · tap a seat to add or drop it</div>
+    </div>` : ''}
+    ${zones.length ? html`
+    <div style="display:flex;flex-direction:column;gap:var(--space-3)">
+      <h4 style="font-size:15px;margin:0">Standing zones</h4>
+      ${zones.map(g => html`
+      <div style="display:flex;align-items:center;gap:var(--space-4);padding:var(--space-4) var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-md);background:var(--color-surface)">
+        <div style="flex:1;min-width:0"><div style="font-family:var(--font-heading);font-weight:500;font-size:14px">${g.zone}</div><div style="font-size:12px;color:var(--color-neutral-500)">${g.type} · ${baht(g.price)} · ${g.free.length} of ${g.units.length} free · no seat number (BR16)</div></div>
+        <div class="seg"><button data-click="${() => stepStanding(g, -1)}" style="${seg(false)}">−</button><span style="padding:5px 12px;font-size:13px;font-variant-numeric:tabular-nums">${S.standing[g.key] || 0}</span><button data-click="${() => stepStanding(g, 1)}" style="${seg(false)}">+</button></div>
+      </div>`)}
+    </div>` : ''}
   </div>
-  <div style="width:320px;flex:none;display:flex;flex-direction:column;gap:var(--space-4);padding:var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-lg);background:var(--color-surface);box-shadow:var(--shadow-md)">
+  <div style="width:340px;flex:none;${PANEL}">
     <h4 style="font-size:15px;margin:0">Your selection</h4>
-    ${v.noneSelected ? html`<div style="padding:var(--space-6);border:1px dashed var(--color-neutral-800);border-radius:var(--radius-md);font-size:12.5px;color:var(--color-neutral-500);text-align:center">Pick a seat to start your ${v.holdLabel} hold.</div>` : ''}
-    ${v.picked.map(p => html`
-    <div style="display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3) var(--space-4);border:1px solid var(--color-neutral-800);border-radius:var(--radius-md)">
-      <div style="flex:1;min-width:0"><div style="font-family:var(--font-heading);font-weight:500;font-size:13.5px">${p.label}</div><div style="font-size:11.5px;color:var(--color-neutral-500)">${p.tier}</div></div>
-      <div style="font-size:13.5px">${p.price}</div>
-      <button data-click="${p.onRemove}" class="btn btn-ghost" style="font-size:12px;padding:2px 6px;color:var(--color-neutral-500)">✕</button>
+    ${!chosen.length ? html`<div style="padding:var(--space-6);border:1px dashed var(--color-neutral-800);border-radius:var(--radius-md);font-size:12.5px;color:var(--color-neutral-500);text-align:center">Pick seats or standing places. Nothing is held until you reserve.</div>` : ''}
+    ${chosen.map((c, i) => html`
+    <div style="display:flex;flex-direction:column;gap:var(--space-2);padding:var(--space-3) var(--space-4);border:1px solid var(--color-neutral-800);border-radius:var(--radius-md)">
+      <div style="display:flex;align-items:center;gap:var(--space-3)">
+        <div style="flex:1;min-width:0"><div style="font-family:var(--font-heading);font-weight:500;font-size:13.5px">${c.label}</div><div style="font-size:11.5px;color:var(--color-neutral-500)">Ticket ${i + 1} · ${c.type}</div></div>
+        <div style="font-size:13.5px">${baht(c.price)}</div>
+        <button data-click="${() => c.group ? stepStanding(zones.find(g => g.key === c.group), -1) : toggleSeat(c.unit)}" class="btn btn-ghost" style="font-size:12px;padding:2px 6px;color:var(--color-neutral-500)">✕</button>
+      </div>
+      ${i >= CONFIG.freeWithoutId ? html`
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-2)">
+        <input value="${att(i).name}" data-input="${setAtt(i, 'name')}" class="input" placeholder="Attendee name" style="font-size:12.5px;border-color:${bd(S.attTouched && !att(i).name.trim())}">
+        <input value="${att(i).idn}" data-input="${setAtt(i, 'idn')}" class="input" placeholder="ID number" style="font-size:12.5px;${MONO};border-color:${bd(S.attTouched && !att(i).idn.trim())}">
+      </div>` : ''}
     </div>`)}
+    ${chosen.length > CONFIG.freeWithoutId ? html`<div style="font-size:11.5px;color:var(--color-accent-300)">BR24: tickets after the 2nd need the attendee’s name and ID number, and an ID can hold one ticket per event.</div>` : ''}
+    <div style="display:flex;gap:var(--space-3)"><input value="${S.code}" data-input="${e => setState({ code: e.target.value.toUpperCase() })}" class="input" placeholder="Promotion code (optional)" style="flex:1;${MONO};text-transform:uppercase"></div>
+    <div style="font-size:11.5px;color:var(--color-neutral-600)">Valid today: ${S.promos.filter(p => p.active_today).map(p => p.coupon_code).join(' · ') || 'none'}</div>
     <div style="height:1px;background:var(--color-divider)"></div>
-    ${totalsBlock(v, v.sub.label, 'Total', '16px')}
-    <button data-click="${v.goCheckout}" ${v.noneSelected ? html`disabled` : ''} class="btn btn-primary btn-block">Continue to payment</button>
-    <div style="font-size:11.5px;color:var(--color-neutral-500)">${v.holdHint}</div>
+    <div style="display:flex;justify-content:space-between;font-family:var(--font-heading);font-weight:500;font-size:16px"><span>Subtotal</span><span>${baht(subtotal)}</span></div>
+    <div style="font-size:11.5px;color:var(--color-neutral-500)">The database works out the discount and fixes every price when you reserve (BR21).</div>
+    <button data-click="${reserve}" ${!chosen.length || S.busy ? html`disabled` : ''} class="btn btn-primary btn-block">${S.busy ? 'Reserving…' : 'Reserve & hold ' + CONFIG.holdMinutes + ' min'}</button>
   </div>
 </div>`;
 }
 
-function checkoutView(v) {
-  const field = (label, value, onInput, placeholder, border, error) => html`
-<div class="field"><label>${label}</label><input value="${value}" data-input="${onInput}" class="input" placeholder="${placeholder}" style="border-color:${border}">${fieldError(error)}</div>`;
+function itemRows(b) {
+  return b.items.map(it => html`
+  <div style="display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3) var(--space-4);border:1px solid var(--color-neutral-800);border-radius:var(--radius-md)">
+    <div style="flex:1;min-width:0"><div style="font-family:var(--font-heading);font-weight:500;font-size:13.5px">${it.unit_kind === 'Seated' ? 'Seat ' + it.row_label + it.seat_number : it.zone_name + ' (standing)'}</div><div style="font-size:11.5px;color:var(--color-neutral-500)">${it.type_name}${it.attendee_name ? ' · ' + it.attendee_name : ''}</div></div>
+    ${it.ticket_code ? html`<span style="${MONO};font-size:12px;color:var(--color-accent-300)">${it.ticket_code}</span>` : ''}
+    <div style="font-size:13.5px">${baht(it.price_paid)}</div>
+  </div>`);
+}
+
+function totals(b, size) {
+  const sub = b.items.reduce((t, it) => t + it.price_paid, 0), paid = paidSoFar(b);
+  const line = (l, r, c) => html`<div style="display:flex;justify-content:space-between;color:${c || 'var(--color-neutral-400)'}"><span>${l}</span><span>${r}</span></div>`;
+  return html`
+<div style="display:flex;flex-direction:column;gap:5px;font-size:12.5px">
+  ${line(plural(b.items.length, 'ticket'), baht(sub))}
+  ${b.discount_amount_applied > 0 ? line((b.coupon_code || 'Promotion') + ' (BR8)', '−' + baht(b.discount_amount_applied), 'var(--color-accent-300)') : ''}
+  <div style="display:flex;justify-content:space-between;padding-top:var(--space-3);margin-top:var(--space-2);border-top:1px solid var(--color-divider);font-family:var(--font-heading);font-weight:500;font-size:${size}"><span>Total</span><span>${baht(b.total_amount)}</span></div>
+  ${paid > 0 ? line('Paid so far', baht(paid)) : ''}
+  ${b.booking_status === 'Pending' && paid > 0 ? line('Still due', baht(remainingOf(b)), 'var(--color-accent-300)') : ''}
+</div>`;
+}
+
+function checkoutView() {
+  const S = state, b = S.booking, ev = S.event;
+  if (!b) return html`<div class="pane" data-key="checkout" style="${EMPTY}">No booking open. <button data-click="${() => go('customer', 'mine')}" class="btn btn-ghost" style="font-size:13px">My reservations</button></div>`;
+  const pending = b.booking_status === 'Pending';
   return html`
 <div class="pane" data-key="checkout" style="display:flex;flex-wrap:wrap;gap:var(--space-8);align-items:flex-start">
   <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:var(--space-6)">
-    <h1 style="font-size:28px;margin:0">Checkout</h1>
-    <div style="display:flex;flex-direction:column;gap:var(--space-4)">
-      <h6 style="margin:0;color:var(--color-neutral-500)">1 · Contact</h6>
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:var(--space-4)">
-        ${field('Full name', v.f.name, v.setName, 'Ana Ferreira', v.err.nameBorder, v.err.name)}
-        ${field('Email for the ticket', v.f.email, v.setEmail, 'you@example.com', v.err.emailBorder, v.err.email)}
-      </div>
-    </div>
+    <div style="display:flex;align-items:center;gap:var(--space-3)"><h1 style="font-size:28px;margin:0">Checkout</h1>${statusPill(b.booking_status)}</div>
+    ${!pending ? html`<div style="${NOTE}">Booking #${b.booking_id} is ${b.booking_status}. ${b.booking_status === 'Expired' ? 'The ' + CONFIG.holdMinutes + '-minute hold ran out before it was paid, so its units went back on sale (BR18).' : ''}</div>` : ''}
     <div style="display:flex;flex-direction:column;gap:var(--space-3)">
-      <h6 style="margin:0;color:var(--color-neutral-500)">2 · Discount</h6>
-      <div style="display:flex;gap:var(--space-3);align-items:flex-start;flex-wrap:wrap">
-        <input value="${v.code}" data-input="${v.setCode}" class="input" placeholder="Promo code" style="flex:1;min-width:160px;${MONO};text-transform:uppercase;border-color:${v.err.codeBorder}">
-        <button data-click="${v.applyCode}" class="btn btn-secondary">Apply</button>
-      </div>
-      ${v.codeMsg ? html`<div style="font-size:12px;color:${v.codeMsgColor}">${v.codeMsg}</div>` : ''}
-      <div style="font-size:11.5px;color:var(--color-neutral-600)">Live codes in this prototype: ${v.liveCodes}</div>
+      <h6 style="margin:0;color:var(--color-neutral-500)">1 · Your tickets — booking #${b.booking_id}</h6>
+      ${itemRows(b)}
     </div>
+    ${pending ? html`
     <div style="display:flex;flex-direction:column;gap:var(--space-4)">
-      <h6 style="margin:0;color:var(--color-neutral-500)">3 · Payment</h6>
-      ${field('Card number', v.f.card, v.setCard, '4242 4242 4242 4242', v.err.cardBorder, v.err.card)}
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:var(--space-4)">
-        ${field('Expiry', v.f.exp, v.setExp, 'MM/YY', v.err.expBorder, v.err.exp)}
-        ${field('CVC', v.f.cvc, v.setCvc, '123', v.err.cvcBorder, v.err.cvc)}
+      <h6 style="margin:0;color:var(--color-neutral-500)">2 · Payment</h6>
+      <div class="seg" style="align-self:flex-start">${PAY_METHODS.map(m => html`<button data-click="${() => setState({ pay: Object.assign({}, S.pay, { method: m }) })}" style="${seg(S.pay.method === m)}">${m}</button>`)}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:var(--space-4)">
+        ${field('Amount (฿)', S.pay.amount, set('pay', 'amount'), { type: 'number' })}
+        <div class="field"><label>Result (sample data — no real gateway)</label><div class="seg">${['Successful', 'Failed', 'Pending'].map(st => html`<button data-click="${() => setState({ pay: Object.assign({}, S.pay, { status: st }) })}" style="${seg(S.pay.status === st)}">${st}</button>`)}</div></div>
       </div>
-    </div>
+      <div style="font-size:11.5px;color:var(--color-neutral-500)">BR19: the booking is Paid once its Successful payments add up to the total. You can split it across several payments.</div>
+    </div>` : ''}
+    ${b.payments.length ? html`
+    <div style="display:flex;flex-direction:column;gap:var(--space-3)">
+      <h6 style="margin:0;color:var(--color-neutral-500)">Payments on this booking (BR6)</h6>
+      <table class="table"><thead><tr><th>#</th><th>Method</th><th>Amount</th><th>When</th><th>Status</th></tr></thead>
+      <tbody>${b.payments.map(p => html`<tr><td>${p.payment_id}</td><td>${p.payment_method}</td><td>${baht(p.amount)}</td><td>${whenLabel(p.paid_at)}</td><td>${statusPill(p.payment_status)}</td></tr>`)}</tbody></table>
+    </div>` : ''}
   </div>
-  <div style="width:330px;flex:none;position:sticky;top:110px;display:flex;flex-direction:column;gap:var(--space-4);padding:var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-lg);background:var(--color-surface);box-shadow:var(--shadow-md)">
-    <div style="display:flex;flex-direction:column;gap:4px"><div style="font-family:var(--font-heading);font-weight:500;font-size:15px">${v.ev.title}</div><div style="font-size:12px;color:var(--color-neutral-500)">${v.ev.meta}</div></div>
+  <div style="width:330px;flex:none;position:sticky;top:110px;${PANEL}">
+    <div style="display:flex;flex-direction:column;gap:4px"><div style="font-family:var(--font-heading);font-weight:500;font-size:15px">${b.items[0] ? b.items[0].event_name : ''}</div><div style="font-size:12px;color:var(--color-neutral-500)">${b.items[0] ? whenLabel(b.items[0].event_date) : ''}${ev ? ' · ' + ev.venue_name : ''}</div></div>
     <div style="height:1px;background:var(--color-divider)"></div>
-    ${totalsBlock(v, v.seatsLabel, 'Pay now', '18px')}
-    <button data-click="${v.pay}" ${v.paying ? html`disabled` : ''} class="btn btn-primary btn-block">${v.payLabel}</button>
-    <div style="font-size:11.5px;line-height:1.6;color:var(--color-neutral-500)">Payment converts the ${v.holdLabel} hold into a permanent reservation.</div>
-    <button data-click="${v.goSeats}" class="btn btn-ghost" style="font-size:12px;align-self:flex-start">← Change seats</button>
+    ${totals(b, '18px')}
+    ${pending ? html`<button data-click="${payNow}" ${S.busy ? html`disabled` : ''} class="btn btn-primary btn-block">${S.busy ? 'Recording…' : 'Pay ' + baht(Number(S.pay.amount) || 0) + ' · ' + S.pay.method}</button>
+    <div style="font-size:11.5px;line-height:1.6;color:var(--color-neutral-500)">Payment turns the ${CONFIG.holdMinutes}-minute hold into Sold units and issues one ticket per unit (BR7, BR18).</div>
+    <button data-click="${() => cancelBooking(b.booking_id)}" class="btn btn-ghost" style="font-size:12px;align-self:flex-start">Cancel this booking</button>` : html`
+    <button data-click="${() => go('customer', 'mine')}" class="btn btn-secondary btn-block">My reservations</button>`}
   </div>
 </div>`;
 }
 
-function confirmView(v) {
-  const c = v.conf;
+function confirmView() {
+  const S = state, b = S.booking, ev = S.event;
+  if (!b) return html`<div class="pane" data-key="confirm" style="${EMPTY}">No booking open.</div>`;
+  if (b.booking_status !== 'Paid') return checkoutView();
+  const first = b.items[0] || {};
   const cell = (label, value) => html`<div><div style="font-size:11px;color:var(--color-neutral-500)">${label}</div><div>${value}</div></div>`;
   return html`
 <div class="pane" data-key="confirm" style="display:flex;flex-direction:column;align-items:center;gap:var(--space-8);padding-top:var(--space-8)">
   <div style="display:flex;flex-direction:column;align-items:center;gap:var(--space-3);text-align:center">
     <div style="width:44px;height:44px;border-radius:50%;border:1px solid var(--color-accent);color:var(--color-accent);display:flex;align-items:center;justify-content:center;font-size:19px">✓</div>
-    <h1 style="font-size:28px;margin:0">${c.headline}</h1>
-    <div style="font-size:13.5px;color:var(--color-neutral-400);max-width:56ch">Payment cleared, so the hold is gone — these seats are yours permanently. Ticket sent to ${c.email}.</div>
+    <h1 style="font-size:28px;margin:0">Paid — ${plural(b.items.length, 'ticket')} ${b.items.length > 1 ? 'are' : 'is'} yours</h1>
+    <div style="font-size:13.5px;color:var(--color-neutral-400);max-width:56ch">The hold is gone and every unit is Sold for good. Each one got exactly one ticket code (BR7, BR12, BR20).</div>
   </div>
-  <div style="display:flex;flex-wrap:wrap;width:min(660px,100%);border:1px solid var(--color-neutral-800);border-radius:var(--radius-lg);background:var(--color-surface);overflow:hidden;box-shadow:var(--shadow-md)">
+  <div style="display:flex;flex-wrap:wrap;width:min(700px,100%);border:1px solid var(--color-neutral-800);border-radius:var(--radius-lg);background:var(--color-surface);overflow:hidden;box-shadow:var(--shadow-md)">
     <div style="flex:1;min-width:260px;padding:var(--space-8);display:flex;flex-direction:column;gap:var(--space-4)">
-      <h6 style="margin:0;color:var(--color-neutral-500)">${c.admissions}</h6>
-      <div style="font-family:var(--font-heading);font-weight:500;font-size:19px">${c.title}</div>
+      <h6 style="margin:0;color:var(--color-neutral-500)">Booking #${b.booking_id}</h6>
+      <div style="font-family:var(--font-heading);font-weight:500;font-size:19px">${first.event_name}</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-4);font-size:13px">
-        ${cell('When', c.when)}${cell('Seats', c.seats)}${cell('Venue', c.venue)}${cell('Order', c.ref)}
+        ${cell('When', first.event_date ? whenLabel(first.event_date) : '')}${cell('Venue', ev ? ev.venue_name : '')}
+        ${cell('Total paid', baht(b.total_amount))}${cell('Promotion', b.coupon_code || '—')}
       </div>
-      <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;margin-top:var(--space-2)"><button data-click="${v.toastCal}" class="btn btn-secondary" style="font-size:12.5px">Add to calendar</button><button data-click="${v.toastPdf}" class="btn btn-secondary" style="font-size:12.5px">Download PDF</button></div>
     </div>
-    <div style="width:190px;flex:none;padding:var(--space-8);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--space-3);border-left:1px solid var(--color-divider)">
-      <div style="width:120px;height:120px;border-radius:var(--radius-sm);background:repeating-conic-gradient(var(--color-neutral-100) 0 25%, var(--color-neutral-900) 0 50%) 0/15px 15px"></div>
-      <div style="font-size:11px;color:var(--color-neutral-500)">Scan at the door</div>
+    <div style="width:280px;flex:none;padding:var(--space-8);display:flex;flex-direction:column;gap:var(--space-3);border-left:1px solid var(--color-divider)">
+      <h6 style="margin:0;color:var(--color-neutral-500)">Tickets</h6>
+      ${b.items.map(it => html`<div style="display:flex;justify-content:space-between;gap:var(--space-3);font-size:12.5px"><span>${it.unit_kind === 'Seated' ? 'Seat ' + it.row_label + it.seat_number : it.zone_name}</span><span style="${MONO};color:var(--color-accent-300)">${it.ticket_code}</span></div>`)}
     </div>
   </div>
-  <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;justify-content:center"><button data-click="${v.goMine}" class="btn btn-primary">View my reservations</button><button data-click="${v.goBrowse}" class="btn btn-secondary">Keep browsing</button></div>
+  <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;justify-content:center"><button data-click="${() => go('customer', 'mine')}" class="btn btn-primary">View my reservations</button><button data-click="${() => go('customer', 'browse')}" class="btn btn-secondary">Keep browsing</button></div>
 </div>`;
 }
 
-function mineView(v) {
+function mineView() {
+  const S = state;
+  if (!S.userId) return html`<div class="pane" data-key="mine" style="${EMPTY}">Choose an account to see its reservations. <button data-click="${() => go('customer', 'auth')}" class="btn btn-ghost" style="font-size:13px">Sign in</button></div>`;
+  const tabs = ['Pending', 'Paid', 'Expired', 'Cancelled'];
+  const list = S.mine.filter(b => b.booking_status === S.mineTab);
+  const user = currentUser();
   return html`
 <div class="pane" data-key="mine" style="display:flex;flex-direction:column;gap:var(--space-6)">
-  <h1 style="font-size:28px;margin:0">My reservations</h1>
-  <div style="display:flex;gap:var(--space-2)">${v.mineTabs.map(t => html`<button data-click="${t.onClick}" style="${t.style}">${t.label}</button>`)}</div>
-  ${v.mineEmpty ? html`<div style="padding:var(--space-8);border:1px dashed var(--color-neutral-800);border-radius:var(--radius-md);text-align:center;font-size:13px;color:var(--color-neutral-500)">Nothing here yet. <button data-click="${v.goBrowse}" class="btn btn-ghost" style="font-size:13px">Find an event</button></div>` : ''}
-  ${v.mineList.map(r => html`
-  <div style="display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-4);padding:var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-md);background:var(--color-surface)">
+  ${h1('My reservations', user ? user.full_name + ' · ' + user.email + ' — every booking belongs to exactly one user (BR4)' : '')}
+  <div style="display:flex;gap:var(--space-2);flex-wrap:wrap">${tabs.map(t => html`<button data-click="${() => setState({ mineTab: t })}" style="${chip(S.mineTab === t)}">${t} · ${S.mine.filter(b => b.booking_status === t).length}</button>`)}</div>
+  ${!list.length ? html`<div style="${EMPTY}">Nothing here. <button data-click="${() => go('customer', 'browse')}" class="btn btn-ghost" style="font-size:13px">Find an event</button></div>` : ''}
+  ${list.map(b => html`
+  <div style="display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-4);${BOX}">
     <div style="width:72px;height:56px;flex:none;border-radius:var(--radius-sm);background:linear-gradient(135deg, var(--color-neutral-900), var(--color-section-ghost))"></div>
-    <div style="flex:1;min-width:180px"><div style="font-family:var(--font-heading);font-weight:500;font-size:14.5px">${r.title}</div><div style="font-size:12px;color:var(--color-neutral-400)">${r.when}</div><div style="font-size:11.5px;color:var(--color-neutral-500)">${r.seats}</div></div>
-    <span style="${r.pill}">${r.status}</span>
-    <div style="font-family:var(--font-heading);font-weight:500;font-size:14px">${r.total}</div>
-    <button data-click="${r.onAction}" class="btn btn-secondary" style="font-size:12.5px">${r.action}</button>
+    <div style="flex:1;min-width:180px"><div style="font-family:var(--font-heading);font-weight:500;font-size:14.5px">${b.event_name}</div><div style="font-size:12px;color:var(--color-neutral-400)">${whenLabel(b.event_date)} · ${b.venue_name}</div><div style="font-size:11.5px;color:var(--color-neutral-500)">${b.units} · booking #${b.booking_id} · made ${whenLabel(b.created_at)}</div></div>
+    ${statusPill(b.booking_status)}
+    <div style="font-family:var(--font-heading);font-weight:500;font-size:14px">${baht(b.total_amount)}</div>
+    ${b.booking_status === 'Pending' ? html`<button data-click="${() => openBooking(b.booking_id, 'checkout')}" class="btn btn-primary" style="font-size:12.5px">Pay</button><button data-click="${() => cancelBooking(b.booking_id)}" class="btn btn-secondary" style="font-size:12.5px">Cancel</button>` : ''}
+    ${b.booking_status === 'Paid' ? html`<button data-click="${() => openBooking(b.booking_id, 'confirm')}" class="btn btn-secondary" style="font-size:12.5px">View tickets</button>` : ''}
+    ${b.booking_status === 'Expired' || b.booking_status === 'Cancelled' ? html`<button data-click="${() => openEvent(b.event_id)}" class="btn btn-secondary" style="font-size:12.5px">Try again</button>` : ''}
   </div>`)}
 </div>`;
 }
 
-function authView(v) {
+function authView() {
+  const S = state, e = S.regTouched ? regErrors(S.reg) : {};
   return html`
-<div class="pane" data-key="auth" style="display:flex;justify-content:center;padding-top:var(--space-8)">
-  <div style="width:min(400px,100%);display:flex;flex-direction:column;gap:var(--space-4);padding:var(--space-8);border:1px solid var(--color-neutral-800);border-radius:var(--radius-lg);background:var(--color-surface);box-shadow:var(--shadow-md)">
-    <h1 style="font-size:24px;margin:0">Sign in to reserve</h1>
-    <div style="font-size:12.5px;line-height:1.6;color:var(--color-neutral-400)">Signing in first means the ${v.holdLabel} hold is never spent on account setup.</div>
-    <div class="field"><label>Name</label><input value="${v.a.name}" data-input="${v.setAuthName}" class="input" placeholder="Ana Ferreira"></div>
-    <div class="field"><label>Email</label><input value="${v.a.email}" data-input="${v.setAuthEmail}" class="input" placeholder="you@example.com" style="border-color:${v.err.authBorder}">${fieldError(v.err.auth)}</div>
-    <button data-click="${v.doSignIn}" class="btn btn-primary btn-block">Continue</button>
-    <button data-click="${v.goLogin}" class="btn btn-secondary btn-block">Log in</button>
-    <button data-click="${v.goBrowse}" class="btn btn-ghost" style="font-size:12.5px">Keep browsing as a guest</button>
+<div class="pane" data-key="auth" style="display:flex;flex-wrap:wrap;justify-content:center;gap:var(--space-8);padding-top:var(--space-8)">
+  <div style="width:min(400px,100%);padding:var(--space-8);border-radius:var(--radius-lg);${PANEL}">
+    <h1 style="font-size:24px;margin:0">Choose your account</h1>
+    <div style="font-size:12.5px;line-height:1.6;color:var(--color-neutral-400)">Login and passwords are out of scope for this prototype, so you pick who is booking.</div>
+    <div style="display:flex;flex-direction:column;gap:var(--space-2);max-height:340px;overflow:auto">
+      ${S.users.map(u => html`<button data-click="${() => chooseUser(u.user_id)}" style="${card(u.user_id === S.userId)}"><div style="font-family:var(--font-heading);font-weight:500;font-size:13.5px">${u.full_name}</div><div style="font-size:11.5px;color:var(--color-neutral-500)">${u.email}${u.phone_number ? ' · ' + u.phone_number : ''}</div></button>`)}
+    </div>
+    <button data-click="${() => go('customer', 'browse')}" class="btn btn-ghost" style="font-size:12.5px">Keep browsing as a guest</button>
+  </div>
+  <div style="width:min(400px,100%);padding:var(--space-8);border-radius:var(--radius-lg);${PANEL}">
+    <h1 style="font-size:24px;margin:0">New here? Register</h1>
+    ${field('Full name', S.reg.full_name, set('reg', 'full_name'), { placeholder: 'Somchai Jaidee', error: e.full_name })}
+    ${field('Email', S.reg.email, set('reg', 'email'), { placeholder: 'you@student.example.ac.th', error: e.email })}
+    ${field('Phone (optional)', S.reg.phone_number, set('reg', 'phone_number'), { placeholder: '0812345678' })}
+    <button data-click="${register}" class="btn btn-primary btn-block">Register &amp; continue</button>
+    <div style="font-size:11.5px;color:var(--color-neutral-500)">Each email can register once (BR15).</div>
   </div>
 </div>`;
 }
 
-function loginView(v) {
+/* — organizer — */
+
+function organizerPicker() {
+  const S = state, org = currentOrganizer();
   return html`
-<div class="pane" data-key="login" style="display:flex;justify-content:center;padding-top:var(--space-8)">
-  <div style="width:min(400px,100%);display:flex;flex-direction:column;gap:var(--space-4);padding:var(--space-8);border:1px solid var(--color-neutral-800);border-radius:var(--radius-lg);background:var(--color-surface);box-shadow:var(--shadow-md)">
-    <h1 style="font-size:24px;margin:0">Log in</h1>
-    <div style="font-size:12.5px;line-height:1.6;color:var(--color-neutral-400)">Welcome back. Log in to see your reservations and check out faster.</div>
-    <div class="field"><label>Email</label><input value="${v.l.email}" data-input="${v.setLoginEmail}" class="input" type="email" autocomplete="username" placeholder="you@example.com" style="border-color:${v.err.loginEmailBorder}">${fieldError(v.err.loginEmail)}</div>
-    <div class="field"><label>Password</label><input value="${v.l.password}" data-input="${v.setLoginPassword}" class="input" type="password" autocomplete="current-password" placeholder="Your password" style="border-color:${v.err.loginPasswordBorder}">${fieldError(v.err.loginPassword)}</div>
-    <button data-click="${v.doLogIn}" class="btn btn-primary btn-block">Log in</button>
-    <button data-click="${v.goAuth}" class="btn btn-ghost" style="font-size:12.5px">New here? Sign in instead</button>
-  </div>
-</div>`;
+<div style="display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap">
+  <label style="font-size:12px;color:var(--color-neutral-400)">Acting as</label>
+  <select data-input="${e => { local.set('organizer', e.target.value); setState({ organizerId: Number(e.target.value) }); }}" data-value="${S.organizerId || ''}" class="input" style="width:auto;min-width:220px">
+    ${S.organizers.map(o => html`<option value="${o.organizer_id}">${o.organizer_name}</option>`)}
+  </select>
+  ${org ? statusPill(org.verification_status) : ''}
+</div>
+${org && org.verification_status !== 'Verified' ? html`<div style="${NOTE};border-color:var(--color-accent-700);color:var(--color-accent-300)">BR13: ${org.organizer_name} is ${org.verification_status}. An administrator must verify it before it can create events.</div>` : ''}`;
 }
 
-function dashView(v) {
+function dashView() {
+  const S = state, org = currentOrganizer();
+  const mine = S.allEvents.filter(e => org && e.organizer_id === org.organizer_id);
+  const units = mine.reduce((t, e) => t + e.units, 0), sold = mine.reduce((t, e) => t + e.sold, 0), locked = mine.reduce((t, e) => t + e.locked, 0);
   return html`
 <div class="pane" data-key="dash" style="display:flex;flex-direction:column;gap:var(--space-8)">
-  <div style="display:flex;align-items:baseline;gap:var(--space-4);flex-wrap:wrap"><h1 style="font-size:28px;margin:0">Dashboard</h1><div style="font-size:12.5px;color:var(--color-neutral-500)">${v.orgName} · live prototype data</div><button data-click="${v.oCreate}" class="btn btn-primary" style="margin-left:auto">+ Host an event</button></div>
+  <div style="display:flex;align-items:baseline;gap:var(--space-4);flex-wrap:wrap"><h1 style="font-size:28px;margin:0">Dashboard</h1><div style="font-size:12.5px;color:var(--color-neutral-500)">live from the database</div><button data-click="${() => go('organizer', 'create')}" class="btn btn-primary" style="margin-left:auto">+ Create event</button></div>
+  ${organizerPicker()}
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:var(--space-4)">
-    ${v.kpis.map(k => html`
-    <div style="padding:var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-md);background:var(--color-surface);display:flex;flex-direction:column;gap:5px"><h6 style="margin:0;color:var(--color-neutral-500)">${k.label}</h6><div style="font-family:var(--font-heading);font-weight:500;font-size:26px">${k.value}</div><div style="font-size:11.5px;color:var(--color-accent-300)">${k.note}</div></div>`)}
+    ${kpi('Events', String(mine.length), mine.filter(e => e.event_status === 'On_sale').length + ' on sale (BR1)')}
+    ${kpi('Units sold', String(sold), 'of ' + units + ' admission units')}
+    ${kpi('On hold now', String(locked), 'locked for ' + CONFIG.holdMinutes + ' min (BR17)')}
+    ${kpi('Sell-through', (units ? Math.round(sold / units * 100) : 0) + '%', mine.filter(e => e.units && e.sold === e.units).length + ' sold out')}
   </div>
   <div style="display:flex;flex-wrap:wrap;gap:var(--space-6);align-items:flex-start">
     <div style="flex:1;min-width:300px;display:flex;flex-direction:column;gap:var(--space-4)">
       <h4 style="font-size:16px;margin:0">Your events</h4>
-      ${v.myEvents.map(e => html`
-      <div style="display:flex;flex-direction:column;gap:var(--space-3);padding:var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-md);background:var(--color-surface)">
-        <div style="display:flex;align-items:baseline;gap:var(--space-3);flex-wrap:wrap"><div style="font-family:var(--font-heading);font-weight:500;font-size:15px">${e.title}</div><span style="${e.pill}">${e.state}</span><div style="margin-left:auto;font-size:12px;color:var(--color-neutral-500)">${e.when}</div></div>
-        <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--color-neutral-400)"><span>${e.soldCopy}</span><span>${e.pctLabel}</span></div>
-        <div style="height:5px;border-radius:3px;background:var(--color-neutral-900);overflow:hidden"><div style="height:100%;background:var(--color-accent);width:${e.pct}"></div></div>
-        <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;align-items:center"><div style="font-size:11.5px;color:var(--color-neutral-500)">${e.holdCopy}</div><button data-click="${e.onPreview}" class="btn btn-ghost" style="font-size:12px;margin-left:auto">Preview as attendee</button><button data-click="${e.onOffer}" class="btn btn-secondary" style="font-size:12px">Add an offer</button></div>
-      </div>`)}
+      ${!mine.length ? html`<div style="${EMPTY}">No events yet.</div>` : ''}
+      ${mine.map(e => {
+        const pct = e.units ? Math.round(e.sold / e.units * 100) : 0;
+        return html`
+      <div style="display:flex;flex-direction:column;gap:var(--space-3);${BOX}">
+        <div style="display:flex;align-items:baseline;gap:var(--space-3);flex-wrap:wrap"><div style="font-family:var(--font-heading);font-weight:500;font-size:15px">${e.event_name}</div>${statusPill(e.event_status)}<div style="margin-left:auto;font-size:12px;color:var(--color-neutral-500)">${whenLabel(e.event_date)}</div></div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--color-neutral-400)"><span>${e.sold} of ${e.units} units sold · ${e.locked} on hold</span><span>${pct}%</span></div>
+        ${bar(pct)}
+        <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;align-items:center">
+          <div style="font-size:11.5px;color:var(--color-neutral-500)">${e.seated_units} seated · ${e.standing_units} standing · capacity ${e.total_capacity}</div>
+          <button data-click="${() => openEvent(e.event_id)}" class="btn btn-ghost" style="font-size:12px;margin-left:auto">Preview</button>
+          ${e.event_status === 'Draft' || e.event_status === 'Closed' ? html`<button data-click="${() => setEventStatus(e.event_id, 'On_sale')}" class="btn btn-primary" style="font-size:12px">Open for sale</button>` : ''}
+          ${e.event_status === 'On_sale' ? html`<button data-click="${() => setEventStatus(e.event_id, 'Closed')}" class="btn btn-secondary" style="font-size:12px">Close sales</button>` : ''}
+          ${e.event_status !== 'Cancelled' ? html`<button data-click="${() => setEventStatus(e.event_id, 'Cancelled')}" class="btn btn-secondary" style="font-size:12px">Cancel</button>` : ''}
+        </div>
+      </div>`;
+      })}
     </div>
-    <div style="width:320px;flex:none;display:flex;flex-direction:column;gap:var(--space-4);padding:var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-md);background:var(--color-surface)">
-      <h4 style="font-size:16px;margin:0">Active offers</h4>
-      ${v.offerList.map(o => html`
+    <div style="width:320px;flex:none;${BOX};display:flex;flex-direction:column;gap:var(--space-4)">
+      <h4 style="font-size:16px;margin:0">Promotions</h4>
+      ${S.promos.map(p => html`
       <div style="display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3) var(--space-4);border:1px dashed var(--color-neutral-800);border-radius:var(--radius-sm)">
-        <div style="flex:1;min-width:0"><div style="${MONO};font-size:12.5px">${o.code}</div><div style="font-size:11px;color:var(--color-neutral-500)">${o.detail}</div></div>
-        <div style="font-size:11.5px;color:var(--color-accent-300)">${o.used}</div>
-        <button data-click="${o.onToggle}" class="btn btn-ghost" style="font-size:11px;color:var(--color-neutral-500)">${o.toggleLabel}</button>
+        <div style="flex:1;min-width:0"><div style="${MONO};font-size:12.5px">${p.coupon_code}</div><div style="font-size:11px;color:var(--color-neutral-500)">${promoLabel(p)} · ${dayLabel(p.start_date)} – ${dayLabel(p.end_date)}</div></div>
+        <div style="font-size:11.5px;color:${p.active_today ? 'var(--color-accent-300)' : 'var(--color-neutral-600)'}">${p.active_today ? 'live' : 'off'} · ${p.times_used}</div>
       </div>`)}
-      <button data-click="${v.oOffer}" class="btn btn-primary btn-block" style="font-size:12.5px">+ New offer</button>
+      <button data-click="${() => go('organizer', 'offer')}" class="btn btn-primary btn-block" style="font-size:12.5px">+ New promotion</button>
     </div>
-  </div>
-  <div style="display:flex;flex-direction:column;gap:var(--space-4)">
-    <h4 style="font-size:16px;margin:0">Orders</h4>
-    ${v.noOrders ? html`<div style="padding:var(--space-8);border:1px dashed var(--color-neutral-800);border-radius:var(--radius-md);font-size:13px;color:var(--color-neutral-500);text-align:center">No orders yet — switch to Attend, reserve a seat, and it lands here.</div>` : ''}
-    ${v.hasOrders ? html`
-    <table class="table" style="width:100%">
-      <thead><tr><th>Buyer</th><th>Event</th><th>Seats</th><th>Code</th><th>Total</th><th>Status</th></tr></thead>
-      <tbody>
-        ${v.orderRows.map(o => html`<tr><td>${o.buyer}</td><td>${o.event}</td><td>${o.seats}</td><td style="${MONO}">${o.code}</td><td>${o.total}</td><td><span style="${o.pill}">${o.status}</span></td></tr>`)}
-      </tbody>
-    </table>` : ''}
   </div>
 </div>`;
 }
 
-function createView(v) {
+function createView() {
+  const S = state, n = S.n, p = eventPlan(n), e = S.nTouched ? eventErrors(n) : {}, org = currentOrganizer();
+  const cap = Number(n.capacity) || 0, pct = cap ? Math.min(100, Math.round(p.total / cap * 100)) : 0;
+  const setType = (name, k) => ev => setState({ n: Object.assign({}, n, { types: Object.assign({}, n.types, { [name]: Object.assign({}, n.types[name], { [k]: ev.target.value }) }) }) });
+  const toggle = name => () => setState({ n: Object.assign({}, n, { types: Object.assign({}, n.types, { [name]: Object.assign({}, n.types[name], { on: !n.types[name].on }) }) }) });
+  const box = on => 'width:16px;height:16px;flex:none;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:10px;border:1px solid ' + (on ? 'var(--color-accent)' : 'var(--color-neutral-700)') + ';background:' + (on ? 'var(--color-accent)' : 'transparent') + ';color:' + (on ? 'var(--color-accent-900)' : 'transparent');
+  const check = (ok, text) => html`<div style="display:flex;gap:var(--space-2);font-size:11.5px;color:${ok ? 'var(--color-accent-300)' : 'var(--color-neutral-500)'}"><span>${ok ? '✓' : '○'}</span><span>${text}</span></div>`;
   return html`
 <div class="pane" data-key="create" style="display:flex;flex-direction:column;gap:var(--space-6)">
-  <h1 style="font-size:28px;margin:0">Host an event</h1>
-  <div style="font-size:13px;color:var(--color-neutral-400)">Publishing adds it to the attendee browse list immediately, with a real seat map at the size you set.</div>
+  ${h1('Create an event', 'Creates a Draft with all its admission units. Open it for sale from the dashboard when you are ready.')}
+  ${organizerPicker()}
   <div style="display:flex;flex-wrap:wrap;gap:var(--space-8);align-items:flex-start">
     <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:var(--space-4)">
-      <div class="field"><label>Event title</label><input value="${v.n.title}" data-input="${v.setNTitle}" class="input" placeholder="Autumn Sessions — Night Five" style="border-color:${v.err.nTitleBorder}">${fieldError(v.err.nTitle)}</div>
+      ${field('Event name', n.name, set('n', 'name'), { placeholder: 'SE Night Concert 2026', error: e.name })}
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:var(--space-4)">
-        <div class="field"><label>Category</label><select data-input="${v.setNCat}" data-value="${v.n.cat}" class="input">${v.catOptions.map(c => html`<option value="${c}">${c}</option>`)}</select></div>
-        <div class="field"><label>Venue</label><input value="${v.n.venue}" data-input="${v.setNVenue}" class="input" placeholder="Teatro Sá da Bandeira" style="border-color:${v.err.nVenueBorder}"></div>
-        <div class="field"><label>Date</label><input value="${v.n.date}" data-input="${v.setNDate}" type="date" class="input" style="border-color:${v.err.nDateBorder}"></div>
-        <div class="field"><label>Start time</label><input value="${v.n.time}" data-input="${v.setNTime}" type="time" class="input"></div>
+        ${field('Venue', n.venue, set('n', 'venue'), { placeholder: 'Main Hall, Building 30', error: e.venue })}
+        ${field('Date', n.date, set('n', 'date'), { type: 'date', min: ymd(new Date()), error: e.date })}
+        ${field('Start time', n.time, set('n', 'time'), { type: 'time' })}
+        ${field('Total capacity', n.capacity, set('n', 'capacity'), { type: 'number', error: e.capacity })}
       </div>
-      <div class="field"><label>Description</label><textarea data-input="${v.setNAbout}" class="input" rows="3" placeholder="What happens, doors, running time">${v.n.about}</textarea></div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:var(--space-4)">
-        <div class="field"><label>General price (€)</label><input value="${v.n.price}" data-input="${v.setNPrice}" type="number" class="input" style="border-color:${v.err.nPriceBorder}">${fieldError(v.err.nPrice)}</div>
-        <div class="field"><label>Rows</label><input value="${v.n.rows}" data-input="${v.setNRows}" type="number" class="input"></div>
-        <div class="field"><label>Seats per row</label><input value="${v.n.cols}" data-input="${v.setNCols}" type="number" class="input"></div>
+      <div style="display:flex;flex-direction:column;gap:var(--space-3)">
+        <label style="font-size:12px;color:var(--color-neutral-400)">Ticket types — each can have numbered seats, a standing zone, or both</label>
+        ${TYPE_NAMES.map(name => {
+          const t = n.types[name];
+          return html`
+        <div style="display:flex;flex-direction:column;gap:var(--space-3);padding:var(--space-4) var(--space-6);border:1px solid ${t.on ? 'var(--color-accent-700)' : 'var(--color-neutral-800)'};border-radius:var(--radius-md);background:var(--color-surface)">
+          <button data-click="${toggle(name)}" style="display:flex;align-items:center;gap:var(--space-3);border:0;background:none;padding:0;cursor:pointer;color:var(--color-text);font-family:var(--font-heading);font-weight:500;font-size:14px"><span style="${box(t.on)}">✓</span>${name}</button>
+          ${t.on ? html`
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:var(--space-3)">
+            ${field('Price (฿)', t.price, setType(name, 'price'), { type: 'number' })}
+            ${field('Seat rows', t.rows, setType(name, 'rows'), { placeholder: 'A, B' })}
+            ${field('Seats per row', t.perRow, setType(name, 'perRow'), { type: 'number' })}
+            ${field('Standing zone', t.zone, setType(name, 'zone'), { placeholder: 'Floor' })}
+            ${field('Standing places', t.qty, setType(name, 'qty'), { type: 'number' })}
+          </div>` : ''}
+        </div>`;
+        })}
+        ${fieldError(e.types)}
       </div>
-      <div style="display:flex;flex-direction:column;gap:var(--space-2)"><label style="font-size:12px;color:var(--color-neutral-400)">Seat hold window</label><div class="seg" style="align-self:flex-start">${v.holdOptions.map(h => html`<button data-click="${h.onClick}" style="${h.style}">${h.label}</button>`)}</div><div style="font-size:11.5px;color:var(--color-neutral-500)">Unpaid holds return to sale automatically when the window closes.</div></div>
-      <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;padding-top:var(--space-2)"><button data-click="${v.publishEvent}" class="btn btn-primary">Publish event</button><button data-click="${v.resetEvent}" class="btn btn-ghost">Reset form</button></div>
+      <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;padding-top:var(--space-2)"><button data-click="${createEvent}" ${!org || org.verification_status !== 'Verified' ? html`disabled` : ''} class="btn btn-primary">Create draft</button><button data-click="${() => setState({ n: blankEvent(), nTouched: false })}" class="btn btn-ghost">Reset form</button></div>
     </div>
     <div style="width:320px;flex:none;display:flex;flex-direction:column;gap:var(--space-4)">
-      <h6 style="margin:0;color:var(--color-neutral-500)">Live preview — browse card</h6>
-      <div style="border:1px solid var(--color-neutral-800);border-radius:var(--radius-md);background:var(--color-surface);overflow:hidden">
-        <div style="height:96px;background:linear-gradient(135deg, var(--color-neutral-900), var(--color-section-ghost))"></div>
-        <div style="padding:var(--space-6);display:flex;flex-direction:column;gap:var(--space-2)"><h6 style="margin:0;color:var(--color-neutral-500)">${v.preview.when}</h6><div style="font-family:var(--font-heading);font-weight:500;font-size:15px">${v.preview.title}</div><div style="font-size:12px;color:var(--color-neutral-400)">${v.preview.venue}</div><div style="display:flex;gap:var(--space-3);align-items:baseline;margin-top:var(--space-2)"><div style="font-family:var(--font-heading);font-weight:500;font-size:14px">${v.preview.price}</div><div style="font-size:11.5px;color:var(--color-neutral-500)">${v.preview.capacity}</div></div></div>
+      <h6 style="margin:0;color:var(--color-neutral-500)">Units this creates</h6>
+      <div style="${BOX};display:flex;flex-direction:column;gap:var(--space-3)">
+        <div style="display:flex;justify-content:space-between;font-size:12.5px;color:var(--color-neutral-400)"><span>Seated_Units</span><span>${p.seated}</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:12.5px;color:var(--color-neutral-400)"><span>Standing_Units</span><span>${p.standing}</span></div>
+        <div style="display:flex;justify-content:space-between;font-family:var(--font-heading);font-weight:500;font-size:15px"><span>Admission_Units</span><span>${p.total} / ${cap}</span></div>
+        ${bar(pct, p.total > cap ? 'var(--color-accent-300)' : 'var(--color-accent)')}
       </div>
-      <div style="padding:var(--space-4);border:1px dashed var(--color-neutral-800);border-radius:var(--radius-md);font-size:11.5px;line-height:1.6;color:var(--color-neutral-500)">Publishing runs three checks: a title, a venue and date, and a price above zero.</div>
+      <h6 style="margin:0;color:var(--color-neutral-500)">Checks the database will run</h6>
+      <div style="${NOTE};display:flex;flex-direction:column;gap:6px">
+        ${check(org && org.verification_status === 'Verified', 'BR13 — organizer is verified')}
+        ${check(p.types.length > 0, 'BR11 — at least one ticket type with units')}
+        ${check(p.types.length > 0 && p.types.every(t => t.price > 0), 'BR21 — every price is above zero')}
+        ${check(!p.dupRow, 'BR16 — each row + seat is unique in the event')}
+        ${check(cap > 0 && p.total <= cap, 'BR22 — units ≤ total capacity')}
+        ${check(n.date && new Date(n.date + 'T' + (n.time || '00:00')) > new Date(), 'BR23 — the event is in the future')}
+        ${check(p.types.length > 0 && p.types.every(t => t.seats || t.standing), 'BR10/BR25 — every unit is seated or standing')}
+      </div>
     </div>
   </div>
 </div>`;
 }
 
-function offerView(v) {
+function offerView() {
+  const S = state, g = S.g, e = S.gTouched ? offerErrors(g) : {}, v = Number(g.value) || 0, base = 1000;
+  const raw = g.type === 'Amount' ? v : base * v / 100;
+  const disc = Math.min(base, g.type === 'Percent' && Number(g.cap) > 0 ? Math.min(raw, Number(g.cap)) : raw);
   return html`
 <div class="pane" data-key="offer" style="display:flex;flex-direction:column;gap:var(--space-6)">
-  <h1 style="font-size:28px;margin:0">Create a discount offer</h1>
-  <div style="font-size:13px;color:var(--color-neutral-400)">A published offer works at checkout right away, and can be featured in the promo carousel below the navigator.</div>
+  ${h1('Create a promotion', 'A promotion works on any event while its dates are valid. Customers enter its code when they reserve.')}
   <div style="display:flex;flex-wrap:wrap;gap:var(--space-8);align-items:flex-start">
     <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:var(--space-6)">
       <div style="display:flex;flex-direction:column;gap:var(--space-3)">
-        <label style="font-size:12px;color:var(--color-neutral-400)">Discount type</label>
+        <label style="font-size:12px;color:var(--color-neutral-400)">Discount type — a promotion is exactly one of these (BR26)</label>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:var(--space-3)">
-          ${v.offerTypes.map(t => html`<button data-click="${t.onClick}" style="${t.style}"><div style="font-family:var(--font-heading);font-weight:500;font-size:13.5px">${t.label}</div><div style="font-size:11px;color:var(--color-neutral-500)">${t.note}</div></button>`)}
+          ${[['Amount', 'Amount_Discount', 'a flat baht amount off the booking'], ['Percent', 'Percent_Discount', 'a share of the booking, with an optional cap']].map(([key, label, note]) =>
+            html`<button data-click="${() => setState({ g: Object.assign({}, g, { type: key }) })}" style="${card(g.type === key)}"><div style="font-family:var(--font-heading);font-weight:500;font-size:13.5px">${label}</div><div style="font-size:11px;color:var(--color-neutral-500)">${note}</div></button>`)}
         </div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:var(--space-4)">
-        <div class="field"><label>${v.valueLabel}</label><input value="${v.g.value}" data-input="${v.setGValue}" type="number" class="input" style="border-color:${v.err.gValueBorder}">${fieldError(v.err.gValue)}</div>
-        <div class="field"><label>Code</label><input value="${v.g.code}" data-input="${v.setGCode}" class="input" placeholder="AUTUMN40" style="${MONO};text-transform:uppercase;border-color:${v.err.gCodeBorder}">${fieldError(v.err.gCode)}</div>
-        <div class="field"><label>Redemption cap</label><input value="${v.g.cap}" data-input="${v.setGCap}" type="number" class="input"></div>
-        <div class="field"><label>Applies to</label><select data-input="${v.setGEvent}" data-value="${v.g.event}" class="input"><option value="all">All my events</option>${v.myEvents.map(e => html`<option value="${e.id}">${e.title}</option>`)}</select></div>
+        ${field(g.type === 'Amount' ? 'Amount off (฿)' : 'Percent off (%)', g.value, set('g', 'value'), { type: 'number', error: e.value })}
+        ${g.type === 'Percent' ? field('Max discount (฿, optional)', g.cap, set('g', 'cap'), { type: 'number', error: e.cap }) : ''}
+        ${field('Code', g.code, set('g', 'code', x => x.toUpperCase()), { placeholder: 'EARLYBIRD', error: e.code, style: MONO + ';text-transform:uppercase' })}
+        ${field('Start date', g.start, set('g', 'start'), { type: 'date' })}
+        ${field('End date', g.end, set('g', 'end'), { type: 'date', error: e.end })}
       </div>
-      <button data-click="${v.toggleFeatured}" style="${v.featuredStyle}"><span style="${v.featuredBox}">✓</span><div style="text-align:left"><div style="font-family:var(--font-heading);font-weight:500;font-size:13.5px">Feature in the home promo carousel</div><div style="font-size:11.5px;color:var(--color-neutral-500)">Sits below the navigator and scrolls with the page</div></div></button>
-      <div style="display:flex;gap:var(--space-3);flex-wrap:wrap"><button data-click="${v.publishOffer}" class="btn btn-primary">Publish offer</button><button data-click="${v.oDash}" class="btn btn-ghost">Cancel</button></div>
+      <div style="display:flex;gap:var(--space-3);flex-wrap:wrap"><button data-click="${publishOffer}" class="btn btn-primary">Publish promotion</button><button data-click="${() => go('organizer', 'dash')}" class="btn btn-ghost">Cancel</button></div>
     </div>
     <div style="width:330px;flex:none;display:flex;flex-direction:column;gap:var(--space-4)">
-      <h6 style="margin:0;color:var(--color-neutral-500)">Live preview — carousel slide</h6>
-      <div style="padding:var(--space-6);border:1px solid var(--color-accent-800);border-radius:var(--radius-md);background:linear-gradient(120deg, var(--color-accent-900), var(--color-surface));display:flex;flex-direction:column;gap:var(--space-2)">
-        <span class="tag tag-accent" style="align-self:flex-start;font-size:10px;letter-spacing:.1em;text-transform:uppercase">Limited offer</span>
-        <div style="font-family:var(--font-heading);font-weight:500;font-size:17px">${v.gPreview.title}</div>
-        <div style="font-size:12px;color:var(--color-neutral-400)">${v.gPreview.body}</div>
-      </div>
-      <h6 style="margin:0;color:var(--color-neutral-500)">Live preview — checkout line</h6>
+      <h6 style="margin:0;color:var(--color-neutral-500)">Preview — a ${baht(base)} booking</h6>
       <div style="padding:var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-md);background:var(--color-surface);display:flex;flex-direction:column;gap:5px;font-size:12.5px">
-        <div style="display:flex;justify-content:space-between;color:var(--color-neutral-400)"><span>2 × general seat</span><span>${v.gPreview.base}</span></div>
-        <div style="display:flex;justify-content:space-between;color:var(--color-accent-300)"><span>${v.gPreview.lineLabel}</span><span>${v.gPreview.lineValue}</span></div>
-        <div style="display:flex;justify-content:space-between;font-family:var(--font-heading);font-weight:500;font-size:15px"><span>Total</span><span>${v.gPreview.total}</span></div>
+        <div style="display:flex;justify-content:space-between;color:var(--color-neutral-400)"><span>Tickets</span><span>${baht(base)}</span></div>
+        <div style="display:flex;justify-content:space-between;color:var(--color-accent-300)"><span>${g.code.trim() || 'CODE'} (${g.type === 'Amount' ? '−' + baht(v) : '−' + v + '%'})</span><span>−${baht(disc)}</span></div>
+        <div style="display:flex;justify-content:space-between;font-family:var(--font-heading);font-weight:500;font-size:15px"><span>Total</span><span>${baht(base - disc)}</span></div>
       </div>
-      <div style="padding:var(--space-4);border:1px dashed var(--color-neutral-800);border-radius:var(--radius-md);font-size:11.5px;line-height:1.6;color:var(--color-neutral-500)">Discounts apply to seat prices only — the service fee is never discounted.</div>
-    </div>
-  </div>
-</div>`;
-}
-
-function statsView(v) {
-  return html`
-<div class="pane" data-key="stats" style="display:flex;flex-direction:column;gap:var(--space-8)">
-  <h1 style="font-size:28px;margin:0">Analytics</h1>
-  <div style="display:flex;flex-wrap:wrap;gap:var(--space-6);align-items:stretch">
-    <div style="flex:1;min-width:300px;display:flex;flex-direction:column;gap:var(--space-4);padding:var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-md);background:var(--color-surface)">
-      <h4 style="font-size:15px;margin:0">Seats reserved per day</h4>
-      <div style="height:170px;display:flex;align-items:flex-end;gap:5px">${v.bars.map(b => html`<div title="${b.title}" style="flex:1;border-radius:2px 2px 0 0;height:${b.h};background:${b.fill}"></div>`)}</div>
-      <div style="font-size:11.5px;color:var(--color-neutral-500)">Accent bars used an offer code · today includes your prototype orders</div>
-    </div>
-    <div style="width:300px;flex:none;display:flex;flex-direction:column;gap:var(--space-4);padding:var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-md);background:var(--color-surface)">
-      <h4 style="font-size:15px;margin:0">Hold → paid funnel</h4>
-      ${v.funnel.map(f => html`
-      <div style="display:flex;flex-direction:column;gap:4px"><div style="display:flex;justify-content:space-between;font-size:12px;color:var(--color-neutral-400)"><span>${f.label}</span><span>${f.value}</span></div><div style="height:7px;border-radius:2px;background:var(--color-neutral-900);overflow:hidden"><div style="height:100%;background:var(--color-accent);width:${f.pct}"></div></div></div>`)}
-      <div style="font-size:11.5px;line-height:1.6;color:var(--color-neutral-500)">${v.funnelNote}</div>
+      <div style="${NOTE}">One promotion per booking (BR8), only on bookings made between the start and end dates (BR22). The discount given is stored with the booking and never recalculated (BR21).</div>
     </div>
   </div>
   <div style="display:flex;flex-direction:column;gap:var(--space-4)">
-    <h4 style="font-size:16px;margin:0">Offer performance</h4>
-    <table class="table" style="width:100%">
-      <thead><tr><th>Offer</th><th>Type</th><th>Redeemed</th><th>Discount given</th><th>Net revenue</th></tr></thead>
-      <tbody>${v.offerPerf.map(r => html`<tr><td style="${MONO}">${r.code}</td><td>${r.type}</td><td>${r.redeemed}</td><td>${r.given}</td><td>${r.net}</td></tr>`)}</tbody>
+    <h4 style="font-size:16px;margin:0">All promotions</h4>
+    <table class="table">
+      <thead><tr><th>Code</th><th>Type</th><th>Discount</th><th>Valid</th><th>Today</th><th>Used</th></tr></thead>
+      <tbody>${S.promos.map(p => html`<tr><td style="${MONO}">${p.coupon_code}</td><td>${p.discount_type}</td><td>${promoLabel(p)}</td><td>${dayLabel(p.start_date)} – ${dayLabel(p.end_date)}</td><td>${p.active_today ? html`<span style="${pill('ok')}">Valid</span>` : html`<span style="${pill('quiet')}">Not valid</span>`}</td><td>${p.times_used}</td></tr>`)}</tbody>
     </table>
   </div>
 </div>`;
 }
 
-function page(v) {
+/* — manager — */
+
+function salesView() {
+  const S = state, r = S.reports;
+  const byDay = new Map(r.daily.map(d => [d.day, d]));
+  const days = [];
+  for (let i = 29; i >= 0; i--) { const d = new Date(); d.setDate(d.getDate() - i); days.push(byDay.get(ymd(d)) || { day: ymd(d), tickets_sold: 0, gross: 0 }); }
+  const max = Math.max(1, ...days.map(d => d.tickets_sold));
+  const tickets = days.reduce((t, d) => t + d.tickets_sold, 0), gross = days.reduce((t, d) => t + Number(d.gross), 0);
+  const rev = S.revenue;
+  return html`
+<div class="pane" data-key="sales" style="display:flex;flex-direction:column;gap:var(--space-8)">
+  ${h1('Sales — last 30 days', 'O1: every unit sold, with its sale time and price.')}
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:var(--space-4)">
+    ${kpi('Tickets sold', String(tickets), 'last 30 days')}
+    ${kpi('Gross before discounts', baht(gross), 'sum of price_paid (BR21)')}
+    ${kpi('Busiest day', String(Math.max(...days.map(d => d.tickets_sold))), 'tickets in one day')}
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:var(--space-6);align-items:stretch">
+    <div style="flex:1;min-width:300px;display:flex;flex-direction:column;gap:var(--space-4);${BOX}">
+      <h4 style="font-size:15px;margin:0">Tickets sold per day</h4>
+      <div style="height:170px;display:flex;align-items:flex-end;gap:3px">${days.map((d, i) => html`<div title="${d.day}: ${plural(d.tickets_sold, 'ticket')} · ${baht(d.gross)}" style="flex:1;border-radius:2px 2px 0 0;min-height:2px;height:${Math.round(d.tickets_sold / max * 170)}px;background:${i === days.length - 1 ? 'var(--color-accent)' : d.tickets_sold ? 'var(--color-accent-700)' : 'var(--color-neutral-800)'}"></div>`)}</div>
+      <div style="font-size:11.5px;color:var(--color-neutral-500)">${dayLabel(days[0].day + 'T00:00')} → today (bright bar)</div>
+    </div>
+    <div style="width:300px;flex:none;display:flex;flex-direction:column;gap:var(--space-4);${BOX}">
+      <h4 style="font-size:15px;margin:0">Takings by payment method</h4>
+      <select data-input="${e => { setState({ revenueEvent: e.target.value, revenue: null }); load('revenue'); }}" data-value="${S.revenueEvent}" class="input">
+        <option value="">Choose an event…</option>
+        ${S.allEvents.map(e => html`<option value="${e.event_id}">${e.event_name}</option>`)}
+      </select>
+      ${rev ? html`
+      ${rev.by_method.map(m => html`<div style="display:flex;flex-direction:column;gap:4px"><div style="display:flex;justify-content:space-between;font-size:12px;color:var(--color-neutral-400)"><span>${m.payment_method} · ${plural(m.bookings, 'booking')}</span><span>${baht(m.collected)}</span></div>${bar(rev.total ? Math.round(m.collected / rev.total * 100) : 0)}</div>`)}
+      ${!rev.by_method.length ? html`<div style="font-size:12px;color:var(--color-neutral-500)">No successful payments yet.</div>` : ''}
+      <div style="display:flex;justify-content:space-between;font-family:var(--font-heading);font-weight:500;font-size:15px;padding-top:var(--space-2);border-top:1px solid var(--color-divider)"><span>Collected</span><span>${baht(rev.total)}</span></div>` : ''}
+      <div style="font-size:11.5px;line-height:1.6;color:var(--color-neutral-500)">Only Successful payments count (BR19).</div>
+    </div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:var(--space-4)">
+    <h4 style="font-size:16px;margin:0">Every sale</h4>
+    ${!r.sales.length ? html`<div style="${EMPTY}">No sales in the last 30 days.</div>` : html`
+    <table class="table">
+      <thead><tr><th>Sold at</th><th>Event</th><th>Type</th><th>Unit</th><th>Price paid</th><th>Buyer</th></tr></thead>
+      <tbody>${r.sales.map(s => html`<tr><td>${whenLabel(s.sold_at)}</td><td>${s.event_name}</td><td>${s.type_name}</td><td>${s.unit_kind === 'Seated' ? 'Seat ' + s.row_label + s.seat_number : s.zone_name + ' (standing)'}</td><td>${baht(s.price_paid)}</td><td>${s.buyer}</td></tr>`)}</tbody>
+    </table>`}
+  </div>
+</div>`;
+}
+
+function seatStatusView() {
+  const rows = state.reports.seats;
+  return html`
+<div class="pane" data-key="seatstatus" style="display:flex;flex-direction:column;gap:var(--space-6)">
+  ${h1('Seat status', 'O2: Available / Locked / Sold for every event (BR14), and which events are full.')}
+  <table class="table">
+    <thead><tr><th>Event</th><th>Status</th><th>Capacity</th><th>Available</th><th>Locked</th><th>Sold</th><th style="width:180px">Sold share</th><th>Full</th></tr></thead>
+    <tbody>${rows.map(e => {
+      const units = e.available + e.locked + e.sold, pct = units ? Math.round(e.sold / units * 100) : 0;
+      return html`<tr><td>${e.event_name}</td><td>${statusPill(e.event_status)}</td><td>${e.total_capacity}</td><td>${e.available}</td><td>${e.locked}</td><td>${e.sold}</td><td>${bar(pct)}</td><td>${e.is_full ? html`<span style="${pill('ok')}">Full</span>` : html`<span style="${pill('quiet')}">No</span>`}</td></tr>`;
+    })}</tbody>
+  </table>
+  <div style="${NOTE}">Events with no admission units yet are left out. Locked units belong to holds that end within ${CONFIG.holdMinutes} minutes (BR17, BR18).</div>
+</div>`;
+}
+
+function usageView() {
+  const rows = state.reports.usage;
+  return html`
+<div class="pane" data-key="usage" style="display:flex;flex-direction:column;gap:var(--space-6)">
+  ${h1('Promotion usage', 'O4: each promotion, its valid period, and how many paid bookings used it.')}
+  <table class="table">
+    <thead><tr><th>Code</th><th>Type (BR26)</th><th>Valid</th><th>Times used</th><th>Discount given</th></tr></thead>
+    <tbody>${rows.map(p => html`<tr><td style="${MONO}">${p.coupon_code}</td><td>${p.discount_type}</td><td>${dayLabel(p.start_date)} – ${dayLabel(p.end_date)}</td><td>${p.times_used}</td><td>${baht(p.total_discount_given)}</td></tr>`)}</tbody>
+  </table>
+</div>`;
+}
+
+function holdsView() {
+  const S = state, r = S.reports, gone = Math.floor((S.now - r.fetchedAt) / 1000);
+  return html`
+<div class="pane" data-key="holds" style="display:flex;flex-direction:column;gap:var(--space-6)">
+  ${h1('Unpaid holds', 'Bookings that are still Pending, how long they have waited, and when they expire (BR17, BR18).')}
+  ${!r.pending.length ? html`<div style="${EMPTY}">No unpaid holds right now.</div>` : html`
+  <table class="table">
+    <thead><tr><th>Booking</th><th>User</th><th>Created</th><th>Waiting</th><th>Expires in</th><th>Total</th></tr></thead>
+    <tbody>${r.pending.map(p => html`<tr><td>#${p.booking_id}</td><td>${p.full_name}</td><td>${whenLabel(p.created_at)}</td><td>${clock((p.seconds_waiting + gone) * 1000)}</td><td style="font-variant-numeric:tabular-nums;color:var(--color-accent-300)">${clock(Math.max(0, p.seconds_left - gone) * 1000)}</td><td>${baht(p.total_amount)}</td></tr>`)}</tbody>
+  </table>`}
+  <div style="${NOTE}">This list re-reads the database every ${CONFIG.refreshMs / 1000} seconds. A hold that runs out is marked Expired and its units return to Available.</div>
+</div>`;
+}
+
+/* — administrator — */
+
+function adminOrganizersView() {
+  const S = state;
+  return html`
+<div class="pane" data-key="aorg" style="display:flex;flex-wrap:wrap;gap:var(--space-8);align-items:flex-start">
+  <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:var(--space-4)">
+    ${h1('Organizers', 'Only verified organizers can create events (BR13).')}
+    <table class="table">
+      <thead><tr><th>Organizer</th><th>Contact</th><th>Status</th><th>Verified</th><th></th></tr></thead>
+      <tbody>${S.organizers.map(o => html`<tr><td>${o.organizer_name}</td><td>${o.contact_email}</td><td>${statusPill(o.verification_status)}</td><td>${o.verified_at ? dayLabel(o.verified_at) : '—'}</td><td style="text-align:right;white-space:nowrap">
+        ${o.verification_status !== 'Verified' ? html`<button data-click="${() => verifyOrganizer(o.organizer_id, 'Verified')}" class="btn btn-primary" style="font-size:12px">Verify</button>` : ''}
+        ${o.verification_status !== 'Rejected' ? html`<button data-click="${() => verifyOrganizer(o.organizer_id, 'Rejected')}" class="btn btn-ghost" style="font-size:12px">Reject</button>` : ''}
+      </td></tr>`)}</tbody>
+    </table>
+  </div>
+  <div style="width:320px;flex:none;${PANEL}">
+    <h4 style="font-size:16px;margin:0">Register an organizer</h4>
+    ${field('Name', S.orgForm.organizer_name, set('orgForm', 'organizer_name'), { placeholder: 'Photography Club' })}
+    ${field('Contact email', S.orgForm.contact_email, set('orgForm', 'contact_email'), { placeholder: 'club@example.ac.th' })}
+    <button data-click="${addOrganizer}" class="btn btn-primary btn-block">Register (starts Pending)</button>
+  </div>
+</div>`;
+}
+
+function adminUsersView() {
+  const S = state, u = S.editUser;
+  return html`
+<div class="pane" data-key="ausers" style="display:flex;flex-wrap:wrap;gap:var(--space-8);align-items:flex-start">
+  <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:var(--space-4)">
+    ${h1('Users', 'Correct a user’s details. Emails stay unique (BR15).')}
+    <table class="table">
+      <thead><tr><th>#</th><th>Name</th><th>Email</th><th>Phone</th><th>Joined</th><th></th></tr></thead>
+      <tbody>${S.users.map(x => html`<tr><td>${x.user_id}</td><td>${x.full_name}</td><td>${x.email}</td><td>${x.phone_number || '—'}</td><td>${dayLabel(x.created_at)}</td><td style="text-align:right"><button data-click="${() => setState({ editUser: Object.assign({}, x, { phone_number: x.phone_number || '' }) })}" class="btn btn-ghost" style="font-size:12px">Edit</button></td></tr>`)}</tbody>
+    </table>
+  </div>
+  ${u ? html`
+  <div style="width:320px;flex:none;${PANEL}">
+    <h4 style="font-size:16px;margin:0">Edit user #${u.user_id}</h4>
+    ${field('Full name', u.full_name, set('editUser', 'full_name'))}
+    ${field('Email', u.email, set('editUser', 'email'))}
+    ${field('Phone', u.phone_number, set('editUser', 'phone_number'))}
+    <div style="display:flex;gap:var(--space-3)"><button data-click="${saveUser}" class="btn btn-primary">Save</button><button data-click="${() => setState({ editUser: null })}" class="btn btn-ghost">Cancel</button></div>
+  </div>` : ''}
+</div>`;
+}
+
+function adminEventsView() {
+  const S = state;
+  return html`
+<div class="pane" data-key="aevents" style="display:flex;flex-direction:column;gap:var(--space-6)">
+  ${h1('Events', 'Cancel an event, then remove it. Events with booking history are kept so sales still add up.')}
+  <table class="table">
+    <thead><tr><th>Event</th><th>Organizer</th><th>Date</th><th>Units</th><th>Sold</th><th>Status</th><th></th></tr></thead>
+    <tbody>${S.allEvents.map(e => html`<tr><td>${e.event_name}</td><td>${e.organizer_name}</td><td>${whenLabel(e.event_date)}</td><td>${e.units}</td><td>${e.sold}</td><td>${statusPill(e.event_status)}</td><td style="text-align:right;white-space:nowrap">
+      ${e.event_status !== 'Cancelled' ? html`<button data-click="${() => setEventStatus(e.event_id, 'Cancelled')}" class="btn btn-ghost" style="font-size:12px">Cancel</button>` : html`<button data-click="${() => removeEvent(e.event_id)}" class="btn btn-secondary" style="font-size:12px">Remove</button>`}
+    </td></tr>`)}</tbody>
+  </table>
+</div>`;
+}
+
+/* — business rules — */
+
+const RULES = [
+  ['BR1', 'Relationship', 'An Organizer may create many Events; each Event has exactly one Organizer.', 'Host → Dashboard lists the acting organizer’s events.'],
+  ['BR2', 'Relationship', 'Events offer catalog ticket types (Normal / Priority / VIP) through Event_Ticket_Types.', 'Event page “Ticket types”; Host → Create event.'],
+  ['BR3', 'Relationship', 'Each Admission_Unit is priced by exactly one Event_Ticket_Type.', 'Seat tooltips and standing zones show the type and price.'],
+  ['BR4', 'Relationship', 'A User makes many Bookings; each Booking has exactly one User.', 'Sign in to pick the user; Reservations lists theirs.'],
+  ['BR5', 'Relationship', 'Bookings hold Admission_Units through Booking_items.', 'Checkout lists each unit in the booking.'],
+  ['BR6', 'Relationship', 'A Booking may have many Payments; each Payment settles one Booking.', 'Checkout → “Payments on this booking”.'],
+  ['BR7', 'Relationship', 'Each Booking_item produces at most one Ticket.', 'Confirmation shows one ticket code per unit.'],
+  ['BR8', 'Relationship', 'A Booking applies at most one Promotion.', 'One promotion code field per reservation.'],
+  ['BR9', 'Participation', 'Every Booking has at least one Booking_item.', 'Reserve is disabled until something is picked.'],
+  ['BR10', 'Participation', 'Every Admission_Unit is a Seated_Unit or a Standing_Unit.', 'Seat map rows vs. standing zones.'],
+  ['BR11', 'Participation', 'An Event needs a ticket type and units before it goes on sale.', 'Host → “Open for sale” is refused otherwise.'],
+  ['BR12', 'Participation', 'Tickets are issued only for paid Bookings.', 'Ticket codes appear only after payment completes.'],
+  ['BR13', 'Constraint', 'Only a verified Organizer may create Events.', 'Admin → Organizers verifies; Host → Create is blocked until then.'],
+  ['BR14', 'Constraint', 'Status and type columns only take their allowed values.', 'Status pills everywhere; payment methods and results.'],
+  ['BR15', 'Constraint', 'User email, catalog type name and ticket code are unique; a type appears once per event.', 'Register / Admin → Users refuse a used email.'],
+  ['BR16', 'Constraint', 'A seat’s row + number is unique in its Event; a standing place has a zone instead.', 'Create event refuses a repeated row.'],
+  ['BR17', 'Constraint', 'A Booking locks its units for 5 minutes from creation.', 'The hold bar countdown after Reserve.'],
+  ['BR18', 'Constraint', 'Unpaid Bookings expire and free their units; paid ones make them Sold.', 'Let the timer run out — the units return to Available.'],
+  ['BR19', 'Constraint', 'A Booking is Paid when its Successful Payments cover the total.', 'Pay part of it, or record a Failed payment.'],
+  ['BR20', 'Constraint', 'A unit can be sold once and only once.', 'Sold seats can’t be picked; two buyers racing get one winner.'],
+  ['BR21', 'Constraint', 'Prices are above zero; the price paid and the discount are fixed at sale.', 'Price paid shown per ticket; Manager → Sales.'],
+  ['BR22', 'Constraint', 'Units never exceed capacity; a promotion works only inside its dates.', 'Create event capacity bar; expired codes are refused.'],
+  ['BR23', 'Constraint', 'An Event is dated after it was created, and can’t be booked once it has happened.', 'Create event refuses past dates.'],
+  ['BR24', 'Constraint', 'Tickets after the 2nd need an attendee name and ID; one ID per Event.', 'Seat picker asks for ID from the 3rd ticket.'],
+  ['BR25', 'Specialisation', 'Admission_Unit is Seated or Standing — disjoint and total.', 'Event page “Where you can be”; Host → units preview.'],
+  ['BR26', 'Specialisation', 'Promotion is Amount or Percent — disjoint and total.', 'Host → Promotions discount type.']
+];
+
+function rulesView() {
+  return html`
+<div class="pane" data-key="rules" style="display:flex;flex-direction:column;gap:var(--space-6)">
+  ${h1('Business rules', 'The 26 rules from the proposal. MySQL enforces every one of them (schema.sql, triggers.sql, the booking transactions). This page shows where each one appears in Bookify.')}
+  <table class="table">
+    <thead><tr><th>#</th><th>Category</th><th>Rule</th><th>Where you see it</th></tr></thead>
+    <tbody>${RULES.map(([id, cat, rule, where]) => html`<tr><td>${ruleTag(id)}</td><td style="font-size:12px;color:var(--color-neutral-400);white-space:nowrap">${cat}</td><td>${rule}</td><td style="font-size:12.5px;color:var(--color-neutral-400)">${where}</td></tr>`)}</tbody>
+  </table>
+</div>`;
+}
+
+function page() {
+  const S = state;
+  const views = {
+    customer: { browse: browseView, event: eventView, seats: seatsView, checkout: checkoutView, confirm: confirmView, mine: mineView, auth: authView },
+    organizer: { dash: dashView, create: createView, offer: offerView },
+    manager: { sales: salesView, seats: seatStatusView, usage: usageView, holds: holdsView },
+    admin: { organizers: adminOrganizersView, users: adminUsersView, events: adminEventsView }
+  };
+  const body = S.rules ? rulesView() : views[S.role][S[VIEW_KEY[S.role]]]();
   return html`
 <div style="min-height:100vh;background:radial-gradient(120% 80% at 12% -10%, color-mix(in srgb, var(--color-accent) 9%, transparent), transparent 60%), var(--color-bg)">
-  ${header(v)}
+  ${header()}
   <div data-key="main" style="max-width:1120px;margin:0 auto;padding:var(--space-8) var(--space-8) 64px">
-    ${v.vBrowse ? browseView(v) : ''}
-    ${v.vEvent ? eventView(v) : ''}
-    ${v.vSeats ? seatsView(v) : ''}
-    ${v.vCheckout ? checkoutView(v) : ''}
-    ${v.vConfirm ? confirmView(v) : ''}
-    ${v.vMine ? mineView(v) : ''}
-    ${v.vAuth ? authView(v) : ''}
-    ${v.vLogin ? loginView(v) : ''}
-    ${v.vODash ? dashView(v) : ''}
-    ${v.vOCreate ? createView(v) : ''}
-    ${v.vOOffer ? offerView(v) : ''}
-    ${v.vOStats ? statsView(v) : ''}
+    ${body}
   </div>
-  ${v.toast ? html`<div data-key="toast" style="position:fixed;left:50%;bottom:28px;z-index:80;animation:toastIn .2s ease both;display:flex;align-items:center;gap:var(--space-3);padding:var(--space-4) var(--space-6);border:1px solid var(--color-accent-700);border-radius:var(--radius-md);background:var(--color-accent-900);box-shadow:var(--shadow-lg);font-size:13px;color:var(--color-accent-100);max-width:min(420px,88vw)">${v.toast}</div>` : ''}
+  ${S.toast ? html`<div data-key="toast" style="position:fixed;left:50%;bottom:28px;z-index:80;animation:toastIn .2s ease both;display:flex;align-items:center;gap:var(--space-3);padding:var(--space-4) var(--space-6);border:1px solid var(--color-accent-700);border-radius:var(--radius-md);background:var(--color-accent-900);box-shadow:var(--shadow-lg);font-size:13px;color:var(--color-accent-100);max-width:min(460px,88vw)">${S.toast}</div>` : ''}
 </div>`;
 }
 
@@ -1084,7 +1347,7 @@ const scratch = document.createElement('template');
 function render() {
   renderQueued = false;
   handlers = [];
-  scratch.innerHTML = page(viewModel()).s;
+  scratch.innerHTML = page().s;
   morphChildren(root, scratch.content);
   for (const sel of root.querySelectorAll('select[data-value]')) {
     if (sel.value !== sel.dataset.value) sel.value = sel.dataset.value;
@@ -1100,11 +1363,38 @@ root.addEventListener('input', e => {
   if (el) handlers[el.dataset.input](e);
 });
 
-setInterval(() => setState({ now: Date.now() }), 500);
+// Clock tick: countdowns, and BR18 — when a hold's time is up, ask the
+// database (which expires it) instead of guessing in the browser.
 setInterval(() => {
-  if (CONFIG.promoAutoRotate && state.view === 'browse' && state.role === 'attendee') {
-    setState(s => ({ promo: (s.promo + 1) % Math.max(1, featured().length) }));
+  setState({ now: Date.now() });
+  const b = state.booking;
+  if (b && b.booking_status === 'Pending' && Date.now() >= state.deadline && !state.expiring) {
+    setState({ expiring: true });
+    get('/bookings/' + b.booking_id).then(nb => {
+      setBooking(nb);
+      if (nb.booking_status === 'Expired') {
+        say('The ' + CONFIG.holdMinutes + '-minute hold expired — those units went back on sale (BR18).', 5200);
+        load('mine', 'event');
+      } else if (nb.booking_status === 'Pending') {
+        setState({ deadline: Date.now() + Math.max(1, nb.seconds_left) * 1000 });
+      }
+    }).catch(() => setState({ expiring: false }));
+  }
+}, 500);
+
+// Keep open seat maps and hold lists in step with other buyers.
+setInterval(() => {
+  if (document.hidden || state.rules) return;
+  if (state.role === 'customer' && (state.view === 'seats' || state.view === 'event')) loaders.event().catch(() => {});
+  if (state.role === 'manager' && state.mview === 'holds') loaders.pending().catch(() => {});
+}, CONFIG.refreshMs);
+
+setInterval(() => {
+  if (CONFIG.promoAutoRotate && state.role === 'customer' && state.view === 'browse' && !state.rules) {
+    setState(s => ({ promo: (s.promo + 1) % Math.max(1, s.promos.filter(p => p.active_today).length) }));
   }
 }, 6000);
 
 render();
+go('customer', 'browse');
+load('users', 'mine').then(resumePendingHold);

@@ -8,7 +8,7 @@ const router = express.Router();
 
 // POST /api/bookings
 // { "user_id": 1, "units": [{ "unit_id": 12 }, ...], "promo_code": "SE20" }
-// Seats 3+ need { "attendee_name", "attendee_id_number" } (BR26).
+// Seats 3+ need { "attendee_name", "identity_number" } (BR24).
 router.post('/', async (req, res) => {
   const userId = v.id(req.body.user_id, 'user_id');
   const raw = Array.isArray(req.body.units) ? req.body.units : [];
@@ -16,12 +16,12 @@ router.post('/', async (req, res) => {
   const units = raw.map((u, i) => ({
     unit_id: v.id(u && u.unit_id, `units[${i}].unit_id`),
     attendee_name: v.text(u.attendee_name, `units[${i}].attendee_name`, { max: 100, optional: true }),
-    attendee_id_number: v.text(u.attendee_id_number, `units[${i}].attendee_id_number`, { max: 20, optional: true })
+    identity_number: v.text(u.identity_number, `units[${i}].identity_number`, { max: 20, optional: true })
   }));
   if (new Set(units.map(u => u.unit_id)).size !== units.length) throw new HttpError(400, 'The same unit_id is listed twice.');
-  const identified = units.filter(u => u.attendee_name && u.attendee_id_number).length;
+  const identified = units.filter(u => u.attendee_name && u.identity_number).length;
   if (units.length - identified > bookings.FREE_SEATS_WITHOUT_ID) {
-    throw new HttpError(400, `BR26: for more than ${bookings.FREE_SEATS_WITHOUT_ID} tickets, every extra ticket needs attendee_name and attendee_id_number.`);
+    throw new HttpError(400, `BR24: for more than ${bookings.FREE_SEATS_WITHOUT_ID} tickets, every extra ticket needs attendee_name and identity_number.`);
   }
   const promoCode = v.text(req.body.promo_code, 'promo_code', { max: 30, optional: true });
 

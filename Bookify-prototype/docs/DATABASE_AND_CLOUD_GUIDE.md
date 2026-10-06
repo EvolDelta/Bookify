@@ -21,7 +21,7 @@ What lives where:
 | Folder / file | Purpose |
 |---|---|
 | `db/schema.sql` | Tables, keys, CHECK / UNIQUE / FOREIGN KEY constraints (milestone M4 DDL) |
-| `db/triggers.sql` | Rules that need to look at other rows (BR10–BR13, BR16, BR22, BR25, BR26) |
+| `db/triggers.sql` | Rules that need to look at other rows (BR10–BR13, BR16, BR22–BR25) |
 | `db/seed.sql` | Sample data (milestone M4 sample data) |
 | `db/queries.sql` | 12 report queries (milestone M5 needs ≥ 10) |
 | `src/services/bookings.js` | Lock → pay → sell flow, run as transactions (BR9, BR17–BR19) |
@@ -79,13 +79,13 @@ curl -X POST http://localhost:3000/api/bookings/8/payments -H "content-type: app
 | Role | Method & path | What it does |
 |---|---|---|
 | Customer | `GET /api/events` | Events on sale with available / locked / sold counts |
-| Customer | `GET /api/events/:id` | One event, its ticket types, optional standing zone and every unit's status |
-| Customer | `POST /api/users` | Register (`full_name`, `email`, `phone_number`) |
+| Customer | `GET /api/events/:id` | One event, its ticket types and every unit's kind, seat or zone, and status |
+| Customer | `GET /api/users`, `POST /api/users` | Pick an account, or register (`full_name`, `email`, `phone_number`) |
 | Customer | `POST /api/bookings` | Lock seats for 5 minutes (`user_id`, `units`, optional `promo_code`) |
 | Customer | `POST /api/bookings/:id/payments` | Record a payment (`payment_method`, `amount`, optional `payment_status`) |
 | Customer | `POST /api/bookings/:id/cancel` | Cancel an unpaid booking (`user_id`) |
 | Customer | `GET /api/users/:id/bookings` | "My reservations" |
-| Organizer | `POST /api/events` | Create a Draft event with seats and optionally one standing zone (see `src/routes/events.js`) |
+| Organizer | `POST /api/events` | Create a Draft event with seated and/or standing units (see `src/routes/events.js`) |
 | Organizer | `PATCH /api/events/:id/status` | `On_sale` / `Closed` / `Cancelled` |
 | Organizer | `GET/POST /api/promotions` | List or create Amount / Percent promotions |
 | Manager | `GET /api/reports/sales-last-30-days` | O1 |
@@ -99,13 +99,26 @@ curl -X POST http://localhost:3000/api/bookings/8/payments -H "content-type: app
 
 Login is out of scope in your proposal, so the API trusts the `user_id` the client sends. A real system would get it from a login session instead.
 
-When creating a seated event, the organizer may omit a standing zone or add one by including a `standing_zone` name and `quantity` on a ticket type. The units are counted against the same `total_capacity` as seats. The prototype has no login or role middleware, so it cannot verify whether a request comes from the organizer, host, or an admin; a production deployment must authorize those roles before allowing event changes.
+#### The website
+
+`npm run dev` and open http://localhost:3000. Everything on the page is read from and written to MySQL through the API above, and the switch at the top right moves between the four user roles in the proposal:
+
+| Role | Screens |
+|---|---|
+| Attend (customer) | Browse events and today's promotions → event page → seat map with standing zones → reserve (5-minute hold) → pay (split or failed payments allowed) → ticket codes. "Reservations" lists Pending / Paid / Expired / Cancelled bookings. "Sign in" picks or registers a user, since login is out of scope. |
+| Host (organizer) | Dashboard for the chosen organizer, create an event (seats and/or standing zones per ticket type), open / close / cancel sales, create Amount or Percent promotions |
+| Manage (manager) | Sales in the last 30 days and takings by payment method (O1), seat status and full events (O2), promotion usage (O4), unpaid holds with live countdowns |
+| Admin | Verify organizers (BR13), correct user details, cancel and remove events |
+
+"Rules" lists BR1–BR26 and where each one shows up on the site. When the database refuses something, the page shows its message, which starts with the rule number (for example *"BR11: event needs a ticket type…"*).
+
+An event has no "kind" of its own. Each ticket type describes numbered seats (`rows` + `seats_per_row`), standing places (`zone_name` + `quantity`), or both, so one event can be all seated, all standing, or a mix. Seats become `seated_units` rows and standing places become `standing_units` rows; all of them count against the same `total_capacity`. The prototype has no login or role middleware, so it cannot verify whether a request comes from the organizer, host, or an admin; a production deployment must authorize those roles before allowing event changes.
 
 Example ticket type that includes both seats and standing places at the same price:
 ```json
-{ "type_name": "Normal", "price": 300, "rows": ["B"], "seats_per_row": 20, "standing_zone": "Lawn", "quantity": 80 }
+{ "type_name": "Normal", "price": 300, "rows": ["B"], "seats_per_row": 20, "zone_name": "Lawn", "quantity": 80 }
 ```
-Include it alongside the usual seated ticket types. A ticket type can describe seats, standing places, or both; seats and standing places in one ticket type share its price. All ticket types marked with `standing_zone` for one event must use the same zone name. Omitting the property keeps the event seated-only. `GET /api/events/:id` returns `standing_zone` as the configured name or `null`; each unit also reports its `standing_zone` (or `null` for a numbered seat).
+`GET /api/events/:id` reports `seated_units` / `standing_units` counts, and each unit carries `unit_kind` plus either `row_label` and `seat_number` (Seated) or `zone_name` (Standing); the other fields are `null`. Bookings with more than 2 units need `attendee_name` and `identity_number` on every unit beyond the second (BR24).
 
 ---
 
@@ -121,26 +134,26 @@ A good rule of thumb: **put a rule as low as it can go.** If the database itself
 | BR7 "at most one ticket per item" | `UNIQUE (booking_item_id)` on tickets | schema.sql |
 | BR8 "at most one promotion" | A single `promo_id` column on bookings; one column can't hold two | schema.sql |
 | BR9 "at least one item" | Transaction in `createBooking` (SQL can't say "at least one child row") | bookings.js |
-| BR10 / BR23 / BR24 disjoint + total | Composite FK `(event_id, event_kind)` + `CHECK (event_kind='Seated')` makes it disjoint; `trg_events_bu` makes it total before going on sale | schema.sql, triggers.sql |
+| BR10 / BR25 / BR26 disjoint + total | Composite FK `(unit_id, unit_kind)` + `CHECK (unit_kind='Seated')` makes it disjoint; `trg_events_bu` makes Admission_Units total before going on sale. Promotions use the same composite FK | schema.sql, triggers.sql |
 | BR11 | `trg_events_bu` | triggers.sql |
 | BR12 | `trg_tickets_bi` | triggers.sql |
 | BR13 | `trg_events_bi` | triggers.sql |
 | BR14 allowed values | `ENUM(...)` columns | schema.sql |
 | BR15 uniqueness | `UNIQUE` constraints | schema.sql |
-| BR16 | `CHECK` (seat/standing location shape) + `trg_units_bi/bu` (seated unit must be a seat or a matching optional standing zone) | both |
+| BR16 | `NOT NULL` row/seat on `seated_units`, `zone_name` on `standing_units` + `trg_seated_units_bi/bu` (row + seat unique within the event) | both |
 | BR17 5-minute lock | `CHECK (lock_expires_at = created_at + INTERVAL 5 MINUTE)` | schema.sql |
 | BR18 expiry | `expireStaleBookings()` | bookings.js |
 | BR19 paid when payments cover total | `payBooking()` | bookings.js |
 | BR20 sold once only | Generated column + `UNIQUE` (explained below) | schema.sql |
 | BR21 price > 0, frozen prices | `CHECK`; `price_paid` / `discount_amount_applied` copied at sale time | both |
 | BR22 capacity, promotion period | `trg_units_bi`, `trg_bookings_bi` | triggers.sql |
-| BR25 | `CHECK (event_date > created_at)` + `trg_booking_items_bi` | both |
-| BR26 2-ticket ceiling | `trg_booking_items_bi` + attendee columns on booking_items | both |
+| BR23 | `CHECK (event_date > created_at)` + `trg_booking_items_bi` | both |
+| BR24 2-ticket ceiling, one identity per event | `trg_booking_items_bi` + `attendee_name` / `identity_number` on booking_items | both |
 
 ### Five ideas worth understanding
 
 **1. The subtype pattern (EER specialisation in SQL).**
-`seated_events` stores a fixed `event_kind = 'Seated'` and points at `events(event_id, event_kind)`, a *composite* foreign key. If you try to add a `non_seated_events` row for a seated event, the pair `(1, 'Non_Seated')` doesn't exist in `events`, so the database refuses it. That's how "disjoint" becomes a constraint and not just a sentence. Promotions use the same pattern.
+`seated_units` stores a fixed `unit_kind = 'Seated'` and points at `admission_units(unit_id, unit_kind)`, a *composite* foreign key. If you try to add a `standing_units` row for a seated unit, the pair `(1, 'Standing')` doesn't exist in `admission_units`, so the database refuses it. That's how "disjoint" becomes a constraint and not just a sentence. Promotions use the same pattern.
 
 **2. "Sold once and only once" (BR20) with a generated column.**
 ```sql
@@ -166,10 +179,10 @@ Holds expire lazily. Before any request reads seat status, `expireStaleBookings(
 
 Try each of these in Workbench and read the error message. Each one should fail:
 ```sql
-INSERT INTO non_seated_events (event_id, zone_name) VALUES (1, 'Lawn');          -- BR23
+INSERT INTO standing_units (unit_id, zone_name) VALUES (1, 'Lawn');             -- BR25
 INSERT INTO tickets (booking_item_id, ticket_code) VALUES (12, 'X');              -- BR12
 UPDATE bookings SET booking_status = 'Refunded' WHERE booking_id = 1;             -- BR14
-INSERT INTO admission_units (event_ticket_type_id, row_label, seat_number) VALUES (1, 'A', 1);  -- BR16
+UPDATE seated_units SET row_label = 'A', seat_number = 2 WHERE unit_id = 1;     -- BR16
 ```
 Next, open two Workbench tabs and recreate the race by hand. In tab 1 run `START TRANSACTION; SELECT * FROM admission_units WHERE unit_id = 20 FOR UPDATE;`. In tab 2 run the same two lines and watch it hang. Then run `COMMIT;` in tab 1, and tab 2 continues.
 
@@ -238,5 +251,5 @@ Create a **Web Service** from the repo, with build command `npm install` and sta
 
 ## What isn't done yet
 
-- **The frontend isn't connected to the API.** `public/app.js` still uses its own in-memory demo data, with euros, a 6-seat limit, card payment and "Gather" branding. Connecting it means replacing those arrays with `fetch('/api/…')` calls.
+- **No role checks.** The site's Attend / Host / Manage / Admin switch is for demonstrating the four user roles from the proposal; anyone can use any of them.
 - **Login.** Out of scope, per the proposal.

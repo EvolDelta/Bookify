@@ -25,18 +25,11 @@ INSERT INTO ticket_type_catalog (type_id, type_name, description) VALUES
 
 -- ───────────── events ─────────────
 
-INSERT INTO events (event_id, organizer_id, event_name, event_date, venue_name, event_kind, total_capacity, created_at) VALUES
-  (1, 1, 'SE Night Concert 2026',      TIMESTAMP(CURDATE() + INTERVAL 21 DAY, '19:00:00'), 'Main Hall, Building 30', 'Seated',     60,  NOW() - INTERVAL 40 DAY),
-  (2, 1, 'Freshy Football Cup Final',  TIMESTAMP(CURDATE() + INTERVAL 14 DAY, '16:00:00'), 'University Stadium',     'Non_Seated', 100, NOW() - INTERVAL 30 DAY),
-  (3, 2, 'Hamlet Reloaded',            TIMESTAMP(CURDATE() + INTERVAL 7 DAY,  '18:30:00'), 'Black Box Theatre',      'Seated',     6,   NOW() - INTERVAL 20 DAY),
-  (4, 2, 'Winter Showcase (draft)',    TIMESTAMP(CURDATE() + INTERVAL 60 DAY, '18:00:00'), 'Black Box Theatre',      'Seated',     40,  NOW());
-
-INSERT INTO seated_events (event_id, seat_map_name, total_rows) VALUES
-  (1, 'Main Hall A–E', 5),
-  (3, 'Black Box single row', 1),
-  (4, 'Black Box A–D', 4);
-INSERT INTO non_seated_events (event_id, zone_name) VALUES
-  (2, 'East Stand (standing)');
+INSERT INTO events (event_id, organizer_id, event_name, event_date, venue_name, total_capacity, created_at) VALUES
+  (1, 1, 'SE Night Concert 2026',      TIMESTAMP(CURDATE() + INTERVAL 21 DAY, '19:00:00'), 'Main Hall, Building 30', 60,  NOW() - INTERVAL 40 DAY),
+  (2, 1, 'Freshy Football Cup Final',  TIMESTAMP(CURDATE() + INTERVAL 14 DAY, '16:00:00'), 'University Stadium',     100, NOW() - INTERVAL 30 DAY),
+  (3, 2, 'Hamlet Reloaded',            TIMESTAMP(CURDATE() + INTERVAL 7 DAY,  '18:30:00'), 'Black Box Theatre',      6,   NOW() - INTERVAL 20 DAY),
+  (4, 2, 'Winter Showcase (draft)',    TIMESTAMP(CURDATE() + INTERVAL 60 DAY, '18:00:00'), 'Black Box Theatre',      40,  NOW());
 
 INSERT INTO event_ticket_types (event_ticket_type_id, event_id, type_id, price) VALUES
   (1, 1, 1, 300.00),   -- concert Normal
@@ -47,27 +40,45 @@ INSERT INTO event_ticket_types (event_ticket_type_id, event_id, type_id, price) 
   (6, 3, 1, 250.00)    -- Hamlet Normal
 ;
 
--- Concert seats: row A = VIP (unit 1–10), B–C = Priority (11–30), D–E = Normal (31–50).
+-- Every unit gets an admission_units row (supertype) and then exactly one
+-- seated_units or standing_units row (subtype, BR25).
 -- (Explicit unit_ids: bulk inserts may skip AUTO_INCREMENT numbers.)
-INSERT INTO admission_units (unit_id, event_ticket_type_id, row_label, seat_number)
-WITH RECURSIVE seat (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seat WHERE n < 10)
-SELECT r.idx * 10 + seat.n, r.ett, r.row_label, seat.n
-FROM seat
-CROSS JOIN (SELECT 0 AS idx, 3 AS ett, 'A' AS row_label UNION ALL SELECT 1, 2, 'B' UNION ALL SELECT 2, 2, 'C'
-            UNION ALL SELECT 3, 1, 'D' UNION ALL SELECT 4, 1, 'E') r
-ORDER BY r.row_label, seat.n;
 
--- Football standing places: 80 Normal (units 51–130), 20 VIP (131–150), no row or seat.
-INSERT INTO admission_units (unit_id, event_ticket_type_id)
+-- Concert seats: row A = VIP (unit 1–10), B–C = Priority (11–30), D–E = Normal (31–50).
+INSERT INTO admission_units (unit_id, event_ticket_type_id, unit_kind)
+WITH RECURSIVE seat (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seat WHERE n < 50)
+SELECT n, CASE WHEN n <= 10 THEN 3 WHEN n <= 30 THEN 2 ELSE 1 END, 'Seated' FROM seat ORDER BY n;
+INSERT INTO seated_units (unit_id, row_label, seat_number)
+WITH RECURSIVE seat (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seat WHERE n < 50)
+SELECT n, CHAR(ASCII('A') + (n - 1) DIV 10), (n - 1) MOD 10 + 1 FROM seat ORDER BY n;
+
+-- Football standing places: 80 Normal in the East Stand (units 51–130),
+-- 20 VIP on the VIP Terrace (131–150). No row or seat.
+INSERT INTO admission_units (unit_id, event_ticket_type_id, unit_kind)
 WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100)
-SELECT 50 + i, IF(i <= 80, 4, 5) FROM n ORDER BY i;
+SELECT 50 + i, IF(i <= 80, 4, 5), 'Standing' FROM n ORDER BY i;
+INSERT INTO standing_units (unit_id, zone_name)
+WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100)
+SELECT 50 + i, IF(i <= 80, 'East Stand', 'VIP Terrace') FROM n ORDER BY i;
 
 -- Hamlet: one row of 6 seats (units 151–156).
-INSERT INTO admission_units (unit_id, event_ticket_type_id, row_label, seat_number)
+INSERT INTO admission_units (unit_id, event_ticket_type_id, unit_kind)
 WITH RECURSIVE seat (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seat WHERE n < 6)
-SELECT 150 + n, 6, 'A', n FROM seat ORDER BY n;
+SELECT 150 + n, 6, 'Seated' FROM seat ORDER BY n;
+INSERT INTO seated_units (unit_id, row_label, seat_number)
+WITH RECURSIVE seat (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seat WHERE n < 6)
+SELECT 150 + n, 'A', n FROM seat ORDER BY n;
 
--- Open the three complete events for sale (trg_events_bu checks BR10/BR11).
+-- The concert also has 10 Normal standing places on the Back Lawn (units 157–166),
+-- so one event holds both seated and standing units.
+INSERT INTO admission_units (unit_id, event_ticket_type_id, unit_kind)
+WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10)
+SELECT 156 + i, 1, 'Standing' FROM n ORDER BY i;
+INSERT INTO standing_units (unit_id, zone_name)
+WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10)
+SELECT 156 + i, 'Back Lawn' FROM n ORDER BY i;
+
+-- Open the three complete events for sale (trg_events_bu checks BR11/BR25).
 -- Event 4 stays Draft: it has no ticket types yet, so it could not be opened.
 UPDATE events SET event_status = 'On_sale' WHERE event_id IN (1, 2, 3);
 
@@ -111,14 +122,14 @@ INSERT INTO booking_items (booking_item_id, booking_id, unit_id, price_paid, sol
 INSERT INTO payments (booking_id, payment_method, amount, paid_at, payment_status) VALUES
   (4, 'PromptPay', 500.00, @t + INTERVAL 1 MINUTE, 'Successful');
 
--- B5: Krit, 3 standing football places. The 3rd needs attendee details (BR26).
+-- B5: Krit, 3 standing football places. The 3rd needs attendee details (BR24).
 -- First payment failed, second succeeded (BR19 only counts Successful ones).
 SET @t = NOW() - INTERVAL 1 DAY;
 INSERT INTO bookings VALUES (5, 5, NULL, 'Paid', @t, @t + INTERVAL 5 MINUTE, 450.00, 0);
-INSERT INTO booking_items (booking_item_id, booking_id, unit_id, price_paid, sold_at, attendee_name, attendee_id_number) VALUES
+INSERT INTO booking_items (booking_item_id, booking_id, unit_id, price_paid, sold_at, attendee_name, identity_number) VALUES
   (9,  5, 51, 150.00, @t + INTERVAL 4 MINUTE, NULL, NULL),
   (10, 5, 52, 150.00, @t + INTERVAL 4 MINUTE, NULL, NULL);
-INSERT INTO booking_items (booking_item_id, booking_id, unit_id, price_paid, sold_at, attendee_name, attendee_id_number) VALUES
+INSERT INTO booking_items (booking_item_id, booking_id, unit_id, price_paid, sold_at, attendee_name, identity_number) VALUES
   (11, 5, 53, 150.00, @t + INTERVAL 4 MINUTE, 'Nok Wongsa', '1100700000001');
 INSERT INTO payments (booking_id, payment_method, amount, paid_at, payment_status) VALUES
   (5, 'PromptPay',     450.00, @t + INTERVAL 2 MINUTE, 'Failed'),

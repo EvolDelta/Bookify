@@ -123,7 +123,7 @@ const state = {
   g: blankOffer(), gTouched: false,
   reports: { daily: [], sales: [], seats: [], usage: [], pending: [], fetchedAt: 0 },
   revenueEvent: '', revenue: null,
-  orgForm: { organizer_name: '', contact_email: '' }, editUser: null,
+  editUser: null,
   imgEdit: null,   // { kind: 'event' | 'promo', id, title, current, pick } while the image dialog is open
   now: Date.now(), toast: ''
 };
@@ -614,17 +614,6 @@ async function linkAccount(id, link) {
   try {
     const o = await api(link ? 'POST' : 'DELETE', `/organizers/${id}/account`);
     say(link ? o.account_email + ' now runs ' + o.organizer_name + ' and can log in to Host.' : o.organizer_name + ' has no account now — its owner is back to Customer.');
-  } catch (err) { fail(err); }
-  load('organizers');
-}
-
-async function addOrganizer() {
-  const f = state.orgForm;
-  if (!f.organizer_name.trim() || !EMAIL_RE.test(f.contact_email.trim())) return say('Give a name and a valid contact email.');
-  try {
-    const o = await api('POST', '/organizers', f);
-    setState({ orgForm: { organizer_name: '', contact_email: '' } });
-    say('Registered as Pending' + (o.account_email ? ' and linked to ' + o.account_email : '') + ' — verify it before it creates events (BR13).');
   } catch (err) { fail(err); }
   load('organizers');
 }
@@ -1446,12 +1435,6 @@ function adminOrganizersView() {
         ${o.verification_status !== 'Rejected' ? html`<button data-click="${() => verifyOrganizer(o.organizer_id, 'Rejected')}" class="btn btn-ghost" style="font-size:12px">Reject</button>` : ''}
       </td></tr>`)}</tbody>
     </table>
-  </div>
-  <div style="width:320px;flex:none;${PANEL}">
-    <h4 style="font-size:16px;margin:0">Register an organizer</h4>
-    ${field('Name', S.orgForm.organizer_name, set('orgForm', 'organizer_name'), { placeholder: 'Photography Club' })}
-    ${field('Contact email', S.orgForm.contact_email, set('orgForm', 'contact_email'), { placeholder: 'club@example.ac.th' })}
-    <button data-click="${addOrganizer}" class="btn btn-primary btn-block">Register (starts Pending)</button>
   </div>
 </div>`;
 }

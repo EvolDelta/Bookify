@@ -53,21 +53,27 @@ router.get('/:id', async (req, res) => {
      GROUP BY ett.event_ticket_type_id ORDER BY ett.price DESC`, [id]);
 
   const [units] = await pool.query(
-    `SELECT u.unit_id, u.event_ticket_type_id, c.type_name, u.row_label, u.seat_number, u.unit_status
+    `SELECT u.unit_id, u.event_ticket_type_id, c.type_name, u.row_label, u.seat_number,
+            u.standing_zone_id, sz.zone_name AS standing_zone, u.unit_status
      FROM admission_units u
      JOIN event_ticket_types ett ON ett.event_ticket_type_id = u.event_ticket_type_id
      JOIN ticket_type_catalog c  ON c.type_id = ett.type_id
+     LEFT JOIN standing_zones sz ON sz.standing_zone_id = u.standing_zone_id
      WHERE ett.event_id = ?
      ORDER BY u.row_label, u.seat_number, u.unit_id`, [id]);
 
-  res.json({ ...event, ...sub, ticket_types: ticketTypes, units });
+  const [[standingZone]] = await pool.query('SELECT zone_name FROM standing_zones WHERE event_id = ?', [id]);
+  res.json({ ...event, ...sub, standing_zone: standingZone?.zone_name || null, ticket_types: ticketTypes, units });
 });
 
 // POST /api/events — an admin hosts a new Draft event (with its seats) for an organizer.
 // Seated:     { ..., "event_kind": "Seated", "seat_map_name": "Hall", "ticket_types": [
-//               { "type_name": "VIP", "price": 1200, "rows": ["A"], "seats_per_row": 10 }, ... ] }
+//               { "type_name": "VIP", "price": 1200, "rows": ["A"], "seats_per_row": 10 },
+//               { "type_name": "Normal", "price": 150, "rows": ["B"], "seats_per_row": 10,
+//                 "standing_zone": "Lawn", "quantity": 80 }, ... ] }
 // Non_Seated: { ..., "event_kind": "Non_Seated", "zone_name": "Field", "ticket_types": [
 //               { "type_name": "Normal", "price": 150, "quantity": 80 }, ... ] }
+// A seated event may omit standing_zone entirely or use it for one optional zone.
 router.post('/', requireAdmin, async (req, res) => {
   const b = req.body;
   const e = {
@@ -81,23 +87,49 @@ router.post('/', requireAdmin, async (req, res) => {
   const seated = e.event_kind === 'Seated';
   const types = Array.isArray(b.ticket_types) ? b.ticket_types : [];
   if (!types.length) throw new HttpError(400, 'BR11: ticket_types needs at least one entry.');
+  const typeNames = new Set();
+  let standZoneName = null;
 
   // Turn each ticket type into the list of units it should create.
   const plan = types.map((t, i) => {
     const typeName = v.oneOf(t.type_name, `ticket_types[${i}].type_name`, ['Normal', 'Priority', 'VIP']);
+    if (typeNames.has(typeName)) throw new HttpError(400, `ticket_types contains duplicate type_name "${typeName}".`);
+    typeNames.add(typeName);
     const price = v.money(t.price, `ticket_types[${i}].price`);
     let units;
     if (seated) {
-      const rows = Array.isArray(t.rows) ? t.rows.map(r => v.text(r, `ticket_types[${i}].rows`, { max: 5 }).toUpperCase()) : [];
-      const perRow = v.id(t.seats_per_row, `ticket_types[${i}].seats_per_row`);
-      if (!rows.length) throw new HttpError(400, `ticket_types[${i}].rows must list row labels, e.g. ["A","B"].`);
-      units = rows.flatMap(r => Array.from({ length: perRow }, (_, s) => [r, s + 1]));
+      const hasSeatDefinition = t.rows !== undefined || t.seats_per_row !== undefined;
+      const hasStandingDefinition = t.standing_zone !== undefined;
+      if (!hasSeatDefinition && !hasStandingDefinition) {
+        throw new HttpError(400, `ticket_types[${i}] must describe seats, a standing zone, or both.`);
+      }
+      units = [];
+      if (hasSeatDefinition) {
+        const rows = Array.isArray(t.rows) ? t.rows.map(r => v.text(r, `ticket_types[${i}].rows`, { max: 5 }).toUpperCase()) : [];
+        const perRow = v.id(t.seats_per_row, `ticket_types[${i}].seats_per_row`);
+        if (!rows.length) throw new HttpError(400, `ticket_types[${i}].rows must list row labels, e.g. ["A","B"].`);
+        units.push(...rows.flatMap(r => Array.from({ length: perRow }, (_, s) => [r, s + 1, false])));
+      }
+      if (hasStandingDefinition) {
+        const zoneName = v.text(t.standing_zone, `ticket_types[${i}].standing_zone`, { max: 100 });
+        if (standZoneName && standZoneName.toLowerCase() !== zoneName.toLowerCase()) {
+          throw new HttpError(400, 'A seated event can have only one optional standing zone.');
+        }
+        standZoneName = zoneName;
+        units.push(...Array.from({ length: v.id(t.quantity, `ticket_types[${i}].quantity`) }, () => [null, null, true]));
+      }
     } else {
-      units = Array.from({ length: v.id(t.quantity, `ticket_types[${i}].quantity`) }, () => [null, null]);
+      if (t.standing_zone !== undefined) {
+        throw new HttpError(400, `ticket_types[${i}].standing_zone is only used for seated events.`);
+      }
+      units = Array.from({ length: v.id(t.quantity, `ticket_types[${i}].quantity`) }, () => [null, null, false]);
     }
     return { typeName, price, units };
   });
   const totalUnits = plan.reduce((t, p) => t + p.units.length, 0);
+  if (seated && !plan.some(p => p.units.some(([row]) => row !== null))) {
+    throw new HttpError(400, 'A seated event needs at least one numbered seat.');
+  }
   if (totalUnits > e.total_capacity) {
     throw new HttpError(400, `BR22: ${totalUnits} units requested but total_capacity is ${e.total_capacity}.`);
   }
@@ -113,12 +145,17 @@ router.post('/', requireAdmin, async (req, res) => {
       await conn.query('INSERT INTO non_seated_events (event_id, zone_name) VALUES (?, ?)',
         [id, v.text(b.zone_name, 'zone_name', { max: 100 })]);
     }
+    let standingZoneId = null;
+    if (standZoneName) {
+      const [zone] = await conn.query('INSERT INTO standing_zones (event_id, zone_name) VALUES (?, ?)', [id, standZoneName]);
+      standingZoneId = zone.insertId;
+    }
     for (const p of plan) {
       const [ett] = await conn.query(
         `INSERT INTO event_ticket_types (event_id, type_id, price)
          SELECT ?, type_id, ? FROM ticket_type_catalog WHERE type_name = ?`, [id, p.price, p.typeName]);
-      await conn.query('INSERT INTO admission_units (event_ticket_type_id, row_label, seat_number) VALUES ?',
-        [p.units.map(([row, seat]) => [ett.insertId, row, seat])]);
+      await conn.query('INSERT INTO admission_units (event_ticket_type_id, row_label, seat_number, standing_zone_id) VALUES ?',
+        [p.units.map(([row, seat, isStanding]) => [ett.insertId, row, seat, isStanding ? standingZoneId : null])]);
     }
     return id;
   });
@@ -156,6 +193,7 @@ router.delete('/:id', requireAdmin, async (req, res) => {
     await conn.query('DELETE FROM event_ticket_types WHERE event_id = ?', [id]);
     await conn.query('DELETE FROM seated_events WHERE event_id = ?', [id]);
     await conn.query('DELETE FROM non_seated_events WHERE event_id = ?', [id]);
+    await conn.query('DELETE FROM standing_zones WHERE event_id = ?', [id]);
     await conn.query('DELETE FROM events WHERE event_id = ?', [id]);
   });
   res.status(204).end();

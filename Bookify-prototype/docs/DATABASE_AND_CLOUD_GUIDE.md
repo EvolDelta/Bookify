@@ -30,6 +30,7 @@ What lives where:
 | `src/auth.js`, `src/routes/auth.js` | Sign up, log in, sessions, and the "admins only" checks |
 | `scripts/make-admin.js` | Turns a registered account into an Admin |
 | `scripts/smoke-test.js` | 49 automatic checks of the API, the login rules and the database rules |
+| `scripts/smoke-test.js` | Automatic checks of the API and the database rules |
 
 ---
 
@@ -54,6 +55,7 @@ Open `.env` and set `DB_PASSWORD` to your local MySQL root password. `.env` is i
 npm install
 npm run db:setup      # creates database "bookify": tables, triggers and sample data
 npm run test:api      # 49 checks; should end with "49 checks passed."
+npm run test:api      # should end with all checks passed
 npm run dev           # http://localhost:3000 serves the site, http://localhost:3000/api/... the API
 ```
 
@@ -118,6 +120,34 @@ A guest who calls a login-only route gets **401 Please log in first**. A custome
 - **Passwords** are stored as a salted **scrypt** hash in `users.password_hash`, like `scrypt$16384$8$1$<salt>$<hash>`. The same password gives a different hash for every user, and the hash can't be turned back into the password.
 - **Sessions:** after login, the browser gets a random token in an **HttpOnly** cookie, which page JavaScript can't read. The `sessions` table stores only the SHA-256 hash of that token, and a session lasts 7 days.
 - A wrong password and an unknown email get the same message, *"Wrong email or password."*, so nobody can find out which emails have accounts.
+| Customer | `GET /api/events` | Events on sale with available / locked / sold counts |
+| Customer | `GET /api/events/:id` | One event, its ticket types, optional standing zone and every unit's status |
+| Customer | `POST /api/users` | Register (`full_name`, `email`, `phone_number`) |
+| Customer | `POST /api/bookings` | Lock seats for 5 minutes (`user_id`, `units`, optional `promo_code`) |
+| Customer | `POST /api/bookings/:id/payments` | Record a payment (`payment_method`, `amount`, optional `payment_status`) |
+| Customer | `POST /api/bookings/:id/cancel` | Cancel an unpaid booking (`user_id`) |
+| Customer | `GET /api/users/:id/bookings` | "My reservations" |
+| Organizer | `POST /api/events` | Create a Draft event with seats and optionally one standing zone (see `src/routes/events.js`) |
+| Organizer | `PATCH /api/events/:id/status` | `On_sale` / `Closed` / `Cancelled` |
+| Organizer | `GET/POST /api/promotions` | List or create Amount / Percent promotions |
+| Manager | `GET /api/reports/sales-last-30-days` | O1 |
+| Manager | `GET /api/reports/seat-status` | O2: which events are full |
+| Manager | `GET /api/reports/promotion-usage` | O4 |
+| Manager | `GET /api/reports/pending-bookings` | Unpaid holds and their remaining time |
+| Manager | `GET /api/reports/events/:id/revenue` | Takings split by payment method |
+| Admin | `POST /api/organizers`, `PATCH /api/organizers/:id/verification` | Register and verify organizers (BR13) |
+| Admin | `PATCH /api/users/:id` | Correct a user's details |
+| Admin | `DELETE /api/events/:id` | Remove a cancelled event that has no bookings |
+
+Login is out of scope in your proposal, so the API trusts the `user_id` the client sends. A real system would get it from a login session instead.
+
+When creating a seated event, the organizer may omit a standing zone or add one by including a `standing_zone` name and `quantity` on a ticket type. The units are counted against the same `total_capacity` as seats. The prototype has no login or role middleware, so it cannot verify whether a request comes from the organizer, host, or an admin; a production deployment must authorize those roles before allowing event changes.
+
+Example ticket type that includes both seats and standing places at the same price:
+```json
+{ "type_name": "Normal", "price": 300, "rows": ["B"], "seats_per_row": 20, "standing_zone": "Lawn", "quantity": 80 }
+```
+Include it alongside the usual seated ticket types. A ticket type can describe seats, standing places, or both; seats and standing places in one ticket type share its price. All ticket types marked with `standing_zone` for one event must use the same zone name. Omitting the property keeps the event seated-only. `GET /api/events/:id` returns `standing_zone` as the configured name or `null`; each unit also reports its `standing_zone` (or `null` for a numbered seat).
 
 ---
 
@@ -139,7 +169,7 @@ A good rule of thumb: **put a rule as low as it can go.** If the database itself
 | BR13 | `trg_events_bi` | triggers.sql |
 | BR14 allowed values | `ENUM(...)` columns | schema.sql |
 | BR15 uniqueness | `UNIQUE` constraints | schema.sql |
-| BR16 | `CHECK` (row and seat both or neither) + `trg_units_bi/bu` | both |
+| BR16 | `CHECK` (seat/standing location shape) + `trg_units_bi/bu` (seated unit must be a seat or a matching optional standing zone) | both |
 | BR17 5-minute lock | `CHECK (lock_expires_at = created_at + INTERVAL 5 MINUTE)` | schema.sql |
 | BR18 expiry | `expireStaleBookings()` | bookings.js |
 | BR19 paid when payments cover total | `payBooking()` | bookings.js |

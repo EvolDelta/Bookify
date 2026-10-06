@@ -338,7 +338,7 @@ async function main() {
     await admin.call('PATCH', '/events/3/status', { event_status: 'On_sale' });
   });
   await check('an Organizer account hosts only its own organizer\'s events', async () => {
-    // The seeded account that runs SE Music Society (organizer 1) has no password yet.
+    // Log in as the seeded account that runs SE Music Society (organizer 1), with a password of our own.
     await pool.query('UPDATE users SET password_hash = ? WHERE email = ?', [await hashPassword('music-pass-123'), 'music@se.example.ac.th']);
     const me = await music.call('POST', '/auth/login', { email: 'music@se.example.ac.th', password: 'music-pass-123' });
     assert.deepEqual([me.body.role, me.body.organizer_id], ['Organizer', 1]);

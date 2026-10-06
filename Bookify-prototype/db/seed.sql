@@ -4,20 +4,39 @@
 -- Every row has to pass the triggers, so this file also doubles as a test.
 
 -- ───────────── people ─────────────
+-- Every sample account can log in, so the whole team shares the same logins:
+--   customers and organizers   password123
+--   admin@bookify.test         admin12345
+-- password_hash is the salted scrypt hash of that password (see src/auth.js),
+-- never the password itself. 
 
-INSERT INTO users (user_id, full_name, email, phone_number) VALUES
-  (1, 'Somchai Jaidee',    'somchai@student.example.ac.th', '0812345671'),
-  (2, 'Suda Rakdee',       'suda@student.example.ac.th',    '0812345672'),
-  (3, 'Anan Meesuk',       'anan@student.example.ac.th',    '0812345673'),
-  (4, 'Ploy Chanthra',     'ploy@student.example.ac.th',    '0812345674'),
-  (5, 'Krit Wongsa',       'krit@student.example.ac.th',    '0812345675'),
-  (6, 'Mali Srisuk',       'mali@student.example.ac.th',    '0812345676');
+INSERT INTO users (user_id, full_name, email, phone_number, role, password_hash) VALUES
+  (1, 'Somchai Jaidee', 'somchai@student.example.ac.th', '0812345671', 'Customer',
+   'scrypt$16384$8$1$JJMsGZzIH2vGJsUNXSFOdA==$wJHab04LVKcJoE3UYJ0QhmMCy1TPwhoKCnz5XfSDZTa2ut73LtCje5sNKXdfQ6vmHdK2JK5+odcejEDaXCgPFw=='),
+  (2, 'Suda Rakdee', 'suda@student.example.ac.th', '0812345672', 'Customer',
+   'scrypt$16384$8$1$JTLPD4bDWQID5VNcZhEvnA==$5tAiZeKEYio8MEhTXxyfhxNdB0v5Qncs6fC2i7APdaAr3+EFQdu0SyKraHSDL8VOoGZ8dUTqhOWrNNG9LoM30A=='),
+  (3, 'Anan Meesuk', 'anan@student.example.ac.th', '0812345673', 'Customer',
+   'scrypt$16384$8$1$GHTcj5JfxfvUTr5E+zW3Rg==$5ANf8vPgedBD8/Nk6id8A/YhyFL583C9ePVy3P9CfXTNKhOuucn7DXdbZdBkTk45XTCg/wx5Rfl6M/9OoS+mDg=='),
+  (4, 'Ploy Chanthra', 'ploy@student.example.ac.th', '0812345674', 'Customer',
+   'scrypt$16384$8$1$2t6/PB2c0WvLPgb/KwlAwQ==$YR4xcEI3xAhWyz7wM9jI40UCN3SB0fIlObA0lDwpnPr7XlGQ3p0PA5o/IAFi7g8Qim1LlOcZM2gob/DGAwHvYQ=='),
+  (5, 'Krit Wongsa', 'krit@student.example.ac.th', '0812345675', 'Customer',
+   'scrypt$16384$8$1$EN1iBQx9cq81Gb9URxZP/g==$FKHkpvTHRWzSZuZSJD/2IuO57PiQixCW2eCv5qytO7xp9jgltiaIQR+fVPg83R7tQ/toygscQpM9fwh9sUK4SQ=='),
+  (6, 'Mali Srisuk', 'mali@student.example.ac.th', '0812345676', 'Customer',
+   'scrypt$16384$8$1$Z2nsHeDnIrn5Yt7tlwSaVg==$N8h4RjLLPKo2P3efxtgyaklrH8gB47Zw5PPjxyDB1UCkuMWB859jSFulaXumH7Szat0/sIocBb3MYkZYI4joxw==');
 
 -- The accounts that run each organizer (role Organizer).
-INSERT INTO users (user_id, full_name, email, phone_number, role) VALUES
-  (7, 'SE Music Society',  'music@se.example.ac.th',   '0812345677', 'Organizer'),
-  (8, 'Drama Club',        'drama@club.example.ac.th', '0812345678', 'Organizer'),
-  (9, 'Night Market Live', 'hello@nml.example.com',    '0812345679', 'Organizer');
+INSERT INTO users (user_id, full_name, email, phone_number, role, password_hash) VALUES
+  (7, 'SE Music Society', 'music@se.example.ac.th', '0812345677', 'Organizer',
+   'scrypt$16384$8$1$oHB/N8R60Xtnym0Po2Bnfw==$HBPftM8K6xtnkLezXGa3/biwkOwNUgdZF1135ZDMCRSCKRCrYP0nmyNP6fLFbZY3HJZNUXVXAto54pnbDGxojw=='),
+  (8, 'Drama Club', 'drama@club.example.ac.th', '0812345678', 'Organizer',
+   'scrypt$16384$8$1$rCYjWCqo7pDLul6NeF3kJw==$SUWfymdDYiDwtb08L7UtP8AvRJEzunNpHzmu/Zra1TeJmBZmZWSBBkYP8n/84nO0/zFiE8oy3Pxdc5WXSisQZg=='),
+  (9, 'Night Market Live', 'hello@nml.example.com', '0812345679', 'Organizer',
+   'scrypt$16384$8$1$vkuiYruJiWnY97jT7XhYPA==$qOwOkxHuvWxMqjuIk9xpZ8ZPbLPWtcF2EEi5HeHcnCNjoHvY6k3JYhMhaNa4FmPL4JnGy2MX2d59SaPQr9ItsQ==');
+
+-- The admin: can host for any organizer and run the admin/manager tasks.
+INSERT INTO users (user_id, full_name, email, phone_number, role, password_hash) VALUES
+  (10, 'Bookify Admin', 'admin@bookify.test', NULL, 'Admin',
+   'scrypt$16384$8$1$I3JqWiQuxknqNRiKtMKArA==$9edQn52wgdMP4jVc4R8no0/1mmwC+fKH+6pTnvNyr4UKcYJJUUqGCso+S3FK+8Z3vpzTkbW2jrX8poPlGBREFA==');
 
 INSERT INTO organizers (organizer_id, organizer_name, contact_email, verification_status, verified_at, user_id) VALUES
   (1, 'SE Music Society',   'music@se.example.ac.th',   'Verified', NOW() - INTERVAL 60 DAY, 7),

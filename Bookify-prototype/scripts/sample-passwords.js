@@ -1,5 +1,5 @@
-// Give the sample accounts from db/seed.sql (customers and organizers) a password
-// so you can log in as them.
+// Give every account that has no password one, so you can log in as it.
+// (The sample accounts in db/seed.sql already have one: see the top of that file.)
 //   npm run sample-passwords                  (password: password123)
 //   npm run sample-passwords -- another-pass
 // Only accounts with no password yet are changed, so real registered accounts

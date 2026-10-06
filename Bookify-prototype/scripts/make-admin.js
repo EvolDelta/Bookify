@@ -24,7 +24,7 @@ async function main() {
   const role = !process.argv.includes('--remove') ? 'Admin' : u.organizer_id ? 'Organizer' : 'Customer';
   await pool.query('UPDATE users SET role = ? WHERE email = ?', [role, email]);
   console.log(`${u.full_name} <${email}> is now ${role === 'Admin' ? 'an Admin' : 'a ' + role}.`);
-  if (!u.can_log_in) console.log('Note: this account has no password yet (sample data), so it cannot log in.');
+  if (!u.can_log_in) console.log('Note: this account has no password yet, so it cannot log in.');
 }
 
 main()

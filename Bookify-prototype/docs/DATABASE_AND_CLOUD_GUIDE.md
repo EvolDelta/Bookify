@@ -29,7 +29,7 @@ What lives where:
 | `scripts/db-setup.js` | Builds the database from the `db/` files |
 | `src/auth.js`, `src/routes/auth.js` | Sign up, log in, sessions, and the "organizers / admins only" checks |
 | `scripts/make-admin.js` | Turns a registered account into an Admin |
-| `scripts/sample-passwords.js` | Gives the sample accounts a password for local testing |
+| `scripts/sample-passwords.js` | Gives any account with no password one, for local testing |
 | `scripts/smoke-test.js` | Automatic checks of the API, the login rules and the database rules |
 
 ---
@@ -66,7 +66,19 @@ npm run dev           # http://localhost:3000 serves the site, http://localhost:
 2. Open `db/queries.sql` and run the queries one at a time (Ctrl+Enter on a query). Screenshots of these results are your M5 deliverable.
 3. Go to **Database → Reverse Engineer…** and pick `bookify`. Workbench draws the diagram from the real tables. Compare it with your Draw.io ERD: every entity should be there, with the same keys. This is the "free check on our diagram" your tech-stack table mentions.
 
-### 5. Create your admin account
+### 5. Log in with the sample accounts
+
+`db:setup` loads sample accounts that everyone on the team can log in with. Their passwords are stored in `db/seed.sql` as scrypt hashes, so every copy of the database gets the same logins:
+
+| Account | Email | Password |
+|---|---|---|
+| Admin | `admin@bookify.test` | `admin12345` |
+| Organizers | `music@se.example.ac.th`, `drama@club.example.ac.th`, `hello@nml.example.com` | `password123` |
+| Customers | `somchai@`, `suda@`, `anan@`, `ploy@`, `krit@`, `mali@` … `student.example.ac.th` | `password123` |
+
+These passwords are written in this guide, so anyone can read them. On a database the public can reach, change them, or use `npm run db:schema` (no sample data) and create your own accounts.
+
+#### Making another account an admin
 
 Everyone who signs up on the website is a **Customer**: they can browse and book, but they can't open the **Host** side. To make an admin:
 
@@ -77,7 +89,7 @@ Everyone who signs up on the website is a **Customer**: they can browse and book
    ```
 3. Reload the page. You'll see an **Admin** badge next to your initials, and the **Attend / Host / Manage / Admin** switch appears.
 
-To turn an admin back into a customer, run `npm run make-admin -- your-email@example.com --remove`. If the account runs an organizer, it goes back to Organizer instead. The admin's password never goes into a script or SQL file: they type it on the website, and only a hash is stored.
+To turn an admin back into a customer, run `npm run make-admin -- your-email@example.com --remove`. If the account runs an organizer, it goes back to Organizer instead. Their password never goes into a script or SQL file: they type it on the website, and only a hash is stored.
 
 #### Organizer accounts
 
@@ -90,7 +102,7 @@ An **Organizer** account runs one organizer (`organizers.user_id`). It gets **At
 - When an admin registers an organizer, an existing account with that email is linked straight away.
 - If the person signs up later (with a normal account), the admin clicks **Link account** in the same table. **Unlink** turns the account back into a Customer.
 
-The sample data already has one Organizer account per organizer (`music@se.example.ac.th`, `drama@club.example.ac.th`, `hello@nml.example.com`). Like the sample customers they have no password, so they can't log in until you run `npm run sample-passwords` (local testing only). That script sets the password `password123` on every sample account.
+The sample data already has one Organizer account per organizer (`music@se.example.ac.th`, `drama@club.example.ac.th`, `hello@nml.example.com`). Like the sample customers, their password is `password123`.
 
 ### 6. Try the API
 

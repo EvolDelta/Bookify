@@ -21,7 +21,7 @@ SET FOREIGN_KEY_CHECKS = 1;
 -- A person with a login. Customers book tickets; Organizers also host the
 -- events of the organizer they run (organizers.user_id); Admins can host for
 -- any organizer and run the admin/manager tasks. password_hash is a salted scrypt hash, never
--- the password itself; NULL means the account cannot log in (e.g. sample data).
+-- the password itself; NULL means the account cannot log in.
 CREATE TABLE users (
   user_id        INT AUTO_INCREMENT PRIMARY KEY,
   full_name      VARCHAR(100) NOT NULL,

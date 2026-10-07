@@ -3,8 +3,9 @@
  * one state object, a render() that rebuilds the page from template strings,
  * and a small DOM patcher so focus, scroll and hover states survive
  * re-renders. No framework, no build step.
- * BRxx numbers refer to the business rules in the Lab 7 proposal. The
- * database enforces them; this page shows them and reports their errors. */
+ * BRxx comments mark where a business rule from the Lab 7 proposal shows up.
+ * The database enforces the rules; the page explains them in plain words and
+ * never shows the rule numbers (plainError strips them from API errors). */
 'use strict';
 
 const CONFIG = {
@@ -136,6 +137,13 @@ function setState(patch) {
 
 /* ─────────────────────────── talking to the API ─────────────────────────── */
 
+// API and database errors start with the rule they enforce ("BR13: organizer
+// must be verified..."). The page shows only the explanation.
+const plainError = msg => {
+  const s = String(msg).replace(/^BR\d+(?:\/BR\d+)*:\s*/, '');
+  return s.charAt(0).toUpperCase() + s.slice(1);
+};
+
 // The login cookie is sent automatically (same site).
 async function api(method, path, body) {
   const headers = body ? { 'content-type': 'application/json' } : {};
@@ -145,7 +153,7 @@ async function api(method, path, body) {
   try { data = text ? JSON.parse(text) : null; } catch { /* not JSON */ }
   // The session expired or was logged out elsewhere.
   if (res.status === 401 && state.user && !path.startsWith('/auth/')) endSession('Your session ended — log in again.');
-  if (!res.ok) throw new Error((data && data.error) || `${res.status} ${res.statusText}`);
+  if (!res.ok) throw new Error(plainError((data && data.error) || `${res.status} ${res.statusText}`));
   return data;
 }
 const get = path => api('GET', path);
@@ -271,8 +279,8 @@ function dropStaleSelection(ev) {
 }
 
 function toggleSeat(u) {
-  if (u.unit_status === 'Sold') return say('That seat is already sold (BR20 — a unit sells once only).');
-  if (u.unit_status === 'Locked') return say('Someone is holding that seat for ' + CONFIG.holdMinutes + ' minutes (BR17).');
+  if (u.unit_status === 'Sold') return say('That seat is already sold.');  // BR20: a unit sells once only
+  if (u.unit_status === 'Locked') return say('Someone is holding that seat for ' + CONFIG.holdMinutes + ' minutes.');  // BR17
   const sel = state.selected;
   setState({ selected: sel.includes(u.unit_id) ? sel.filter(id => id !== u.unit_id) : sel.concat([u.unit_id]) });
 }
@@ -293,22 +301,23 @@ async function reserve() {
   if (!S.user) {
     setState({ after: 'seats' });
     go('customer', 'auth');
-    return say('Log in or create an account first — every booking belongs to one user (BR4).');
+    return say('Log in or create an account first.');  // BR4: every booking belongs to one user
   }
-  if (!chosen.length) return say('BR9: a booking needs at least one seat or standing place.');
+  if (!chosen.length) return say('Pick at least one seat or standing place.');  // BR9
   const units = chosen.map((c, i) => {
     if (i < CONFIG.freeWithoutId) return { unit_id: c.unit.unit_id };
     const a = S.attendees[i] || {};
     return { unit_id: c.unit.unit_id, attendee_name: (a.name || '').trim(), identity_number: (a.idn || '').trim() };
   });
+  // BR24: tickets after the 2nd need attendee details, one identity per event.
   const extra = units.slice(CONFIG.freeWithoutId);
   if (extra.some(u => !u.attendee_name || !u.identity_number)) {
     setState({ attTouched: true });
-    return say('BR24: every ticket after the 2nd needs the attendee’s name and ID number.');
+    return say('Every ticket after the 2nd needs the attendee’s name and ID number.');
   }
   if (new Set(extra.map(u => u.identity_number)).size !== extra.length) {
     setState({ attTouched: true });
-    return say('BR24: each extra ticket must be for a different person.');
+    return say('Each extra ticket must be for a different person.');
   }
   setState({ busy: true });
   try {
@@ -318,7 +327,7 @@ async function reserve() {
       pay: Object.assign({}, S.pay, { amount: String(b.total_amount) }) });
     go('customer', 'checkout');
     load('mine');
-    say('Held for ' + CONFIG.holdMinutes + ' minutes (BR17) — pay to make it permanent.');
+    say('Held for ' + CONFIG.holdMinutes + ' minutes — pay to make it permanent.');  // BR17
   } catch (err) {
     fail(err);
     load('event');
@@ -329,7 +338,9 @@ async function reserve() {
 
 async function payNow() {
   const S = state, b = S.booking, amount = Number(S.pay.amount);
-  if (!(amount > 0)) return say('The payment amount must be above zero (BR19).');
+  // BR19: amounts are above zero, and the booking is Paid only once its
+  // Successful payments cover the total. BR12: tickets are issued only then.
+  if (!(amount > 0)) return say('The payment amount must be above zero.');
   setState({ busy: true });
   try {
     const nb = await api('POST', `/bookings/${b.booking_id}/payments`,
@@ -338,12 +349,12 @@ async function payNow() {
     load('mine');
     if (nb.booking_status === 'Paid') {
       go('customer', 'confirm');
-      say('Paid — ' + plural(nb.items.length, 'ticket') + ' issued (BR12).');
+      say('Paid — ' + plural(nb.items.length, 'ticket') + ' issued.');
     } else {
       setState({ pay: Object.assign({}, S.pay, { amount: String(remainingOf(nb)) }) });
       say(S.pay.status === 'Successful'
-        ? 'Partial payment recorded — ' + baht(remainingOf(nb)) + ' still due before it counts as paid (BR19).'
-        : 'Recorded as ' + S.pay.status + ' — only Successful payments count toward the total (BR19).');
+        ? 'Partial payment recorded — ' + baht(remainingOf(nb)) + ' still due before it counts as paid.'
+        : 'Recorded as ' + S.pay.status + ' — only Successful payments count toward the total.');
     }
   } catch (err) {
     fail(err);
@@ -440,7 +451,7 @@ async function register() {
     if (!asOrganizer) return startSession(u, 'Account created — welcome, ' + u.full_name + '.');
     startSession(u, 'Organizer account created.');
     go('organizer', 'dash');
-    say(body.organizer_name + ' is Pending — you can create events once an admin verifies it (BR13).', 6000);
+    say(body.organizer_name + ' is Pending — you can create events once an admin verifies it.', 6000);  // BR13
   } catch (err) {
     fail(err);
   } finally {
@@ -470,18 +481,18 @@ function eventErrors(n) {
   if (!n.name.trim()) e.name = 'Give it a name.';
   if (!n.venue.trim()) e.venue = 'Venue is required.';
   if (!n.date) e.date = 'Pick a date.';
-  else if (new Date(n.date + 'T' + (n.time || '00:00')) <= new Date()) e.date = 'BR23: the event date must be in the future.';
+  else if (new Date(n.date + 'T' + (n.time || '00:00')) <= new Date()) e.date = 'The event date must be in the future.';  // BR23
   if (!(Number.isInteger(cap) && cap > 0)) e.capacity = 'A whole number above zero.';
-  else if (p.total > cap) e.capacity = 'BR22: ' + p.total + ' units but the capacity is ' + cap + '.';
-  if (!p.types.length) e.types = 'BR11: offer at least one ticket type.';
+  else if (p.total > cap) e.capacity = p.total + ' units but the capacity is ' + cap + '.';  // BR22
+  if (!p.types.length) e.types = 'Offer at least one ticket type.';  // BR11
   for (const t of p.types) {
     if (e.types) break;
-    if (!(t.price > 0)) e.types = 'BR21: ' + t.name + ' needs a price above zero.';
+    if (!(t.price > 0)) e.types = t.name + ' needs a price above zero.';  // BR21
     else if ((t.rows.length > 0) !== (t.perRow > 0)) e.types = t.name + ': give both rows and seats per row.';
     else if ((t.zone !== '') !== (t.qty > 0)) e.types = t.name + ': give both a standing zone and a quantity.';
-    else if (!t.seats && !t.standing) e.types = t.name + ' needs seats, a standing zone, or both (BR10).';
+    else if (!t.seats && !t.standing) e.types = t.name + ' needs seats, a standing zone, or both.';  // BR10
   }
-  if (!e.types && p.dupRow) e.types = 'BR16: row ' + p.dupRow + ' is used twice — a row and seat must be unique in the event.';
+  if (!e.types && p.dupRow) e.types = 'Row ' + p.dupRow + ' is used twice — a row and seat must be unique in the event.';  // BR16
   return e;
 }
 
@@ -605,7 +616,7 @@ async function saveImage(remove) {
 async function verifyOrganizer(id, status) {
   try {
     await api('PATCH', `/organizers/${id}/verification`, { verification_status: status });
-    say(status === 'Verified' ? 'Verified — this organizer can now create events (BR13).' : 'Organizer marked ' + status + '.');
+    say(status === 'Verified' ? 'Verified — this organizer can now create events.' : 'Organizer marked ' + status + '.');  // BR13
   } catch (err) { fail(err); }
   load('organizers');
 }
@@ -748,6 +759,8 @@ function header() {
   </div>`;
   const hold = S.role === 'customer' && S.booking && S.booking.booking_status === 'Pending';
   const left = Math.max(0, S.deadline - S.now);
+  // BR17, BR18: the hold banner counts down the 5-minute lock; unpaid units
+  // go back on sale when it runs out.
   return html`
 <div data-key="nav" style="position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:var(--space-6);padding:var(--space-4) var(--space-8);background:color-mix(in srgb, var(--color-bg) 88%, transparent);backdrop-filter:blur(10px);border-bottom:1px solid var(--color-divider)">
   <button data-click="${() => go('customer', 'browse')}" aria-label="Bookify home" style="display:flex;align-items:center;gap:7px;border:0;background:none;cursor:pointer;padding:0;font-family:var(--font-heading);font-weight:500;font-size:17px;letter-spacing:-.02em;color:var(--color-text)">${LOGO}Bookify<span style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--color-accent)">${roleTag}</span></button>
@@ -772,7 +785,7 @@ function header() {
 ${hold ? html`
 <div data-key="hold" style="position:sticky;top:57px;z-index:35;display:flex;align-items:center;gap:var(--space-4);padding:var(--space-3) var(--space-8);background:var(--color-accent-900);border-bottom:1px solid var(--color-accent-700)">
   <div style="font-family:var(--font-heading);font-weight:500;font-size:14px;color:var(--color-accent-200);font-variant-numeric:tabular-nums">${clock(left)}</div>
-  <div style="flex:1;font-size:12.5px;color:var(--color-accent-300)">Booking #${S.booking.booking_id} · ${plural(S.booking.items.length, 'unit')} locked to you — pay ${baht(remainingOf(S.booking))} before the timer ends or they go back on sale (BR17, BR18).</div>
+  <div style="flex:1;font-size:12.5px;color:var(--color-accent-300)">Booking #${S.booking.booking_id} · ${plural(S.booking.items.length, 'unit')} locked to you — pay ${baht(remainingOf(S.booking))} before the timer ends or they go back on sale.</div>
   <div style="width:180px;height:3px;border-radius:2px;background:var(--color-accent-800);overflow:hidden"><div style="height:100%;background:var(--color-accent);width:${Math.round(left / (CONFIG.holdMinutes * 600))}%"></div></div>
   ${S.view !== 'checkout' ? html`<button data-click="${() => openBooking(S.booking.booking_id, 'checkout')}" class="btn btn-ghost" style="font-size:12px;color:var(--color-accent-200)">Pay now</button>` : ''}
   <button data-click="${() => cancelBooking(S.booking.booking_id)}" class="btn btn-ghost" style="font-size:12px;color:var(--color-accent-300)">Release</button>
@@ -794,6 +807,7 @@ function browseView() {
   const live = S.promos.filter(p => p.active_today);
   const pi = Math.min(S.promo, Math.max(0, live.length - 1)), po = live[pi];
   const step = d => () => setState({ promo: (pi + d + live.length) % Math.max(1, live.length) });
+  // BR8: one promotion per booking. BR22: only inside its start and end dates.
   return html`
 <div class="pane" data-key="browse" style="display:flex;flex-direction:column;gap:var(--space-8)">
   <div style="display:flex;align-items:stretch;gap:var(--space-4)">
@@ -803,7 +817,7 @@ function browseView() {
         ${po ? html`
         <div style="display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap"><span class="tag tag-accent" style="font-size:10px;letter-spacing:.1em;text-transform:uppercase">${po.discount_type} discount</span><span style="font-size:11.5px;color:var(--color-neutral-500)">valid ${dayLabel(po.start_date)} – ${dayLabel(po.end_date)} · used ${plural(po.times_used, 'time')}</span></div>
         <h2 style="font-size:28px;margin:0">${promoLabel(po)} with ${po.coupon_code}</h2>
-        <div style="font-size:13.5px;color:var(--color-neutral-400);max-width:52ch">Works on any event while it is valid. One promotion per booking (BR8), and only inside its dates (BR22).</div>
+        <div style="font-size:13.5px;color:var(--color-neutral-400);max-width:52ch">Works on any event while it is valid. One promotion per booking, and only inside its dates.</div>
         <div style="display:flex;align-items:center;gap:var(--space-4);margin-top:var(--space-2)">
           <button data-click="${() => { setState({ code: po.coupon_code }); say(po.coupon_code + ' will be used on your next booking.'); }}" class="btn btn-secondary" style="${MONO};font-size:13px">${po.coupon_code} · use it</button>
         </div>` : html`
@@ -852,6 +866,8 @@ function eventView() {
   if (!ev) return html`<div class="pane" data-key="event" style="${EMPTY}">Loading event…</div>`;
   const zones = standingGroups(ev);
   const onSale = ev.event_status === 'On_sale', full = ev.units > 0 && ev.sold === ev.units;
+  // BR11: an event on sale has ticket types. BR13: its organizer is verified.
+  // BR24: more than 2 tickets need attendee IDs. BR17, BR18: 5-minute hold.
   return html`
 <div class="pane" data-key="event" style="display:flex;flex-direction:column;gap:var(--space-6)">
   <button data-click="${() => go('customer', 'browse')}" class="btn btn-ghost" style="align-self:flex-start;font-size:12.5px">← All events</button>
@@ -870,7 +886,7 @@ function eventView() {
           <div style="flex:1;min-width:0"><div style="font-family:var(--font-heading);font-weight:500;font-size:14px">${t.type_name}</div><div style="font-size:12px;color:var(--color-neutral-500)">${t.description || ''} · ${t.available} of ${t.units} available</div></div>
           <div style="font-family:var(--font-heading);font-weight:500;font-size:15px">${baht(t.price)}</div>
         </div>`)}
-        ${!ev.ticket_types.length ? html`<div style="${EMPTY}">No ticket types yet (BR11).</div>` : ''}
+        ${!ev.ticket_types.length ? html`<div style="${EMPTY}">No ticket types yet.</div>` : ''}
       </div>
       <div style="display:flex;flex-direction:column;gap:var(--space-3)">
         <h4 style="font-size:15px;margin:0">Where you can be</h4>
@@ -881,7 +897,7 @@ function eventView() {
       </div>
       <div style="display:flex;gap:var(--space-4);align-items:center;padding:var(--space-4) var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-md)">
         <div style="width:36px;height:36px;border-radius:50%;background:var(--color-neutral-900);border:1px solid var(--color-neutral-800)"></div>
-        <div style="flex:1;min-width:0"><div style="font-family:var(--font-heading);font-weight:500;font-size:13.5px">${ev.organizer_name}</div><div style="font-size:12px;color:var(--color-neutral-500)">Verified organizer (BR13)</div></div>
+        <div style="flex:1;min-width:0"><div style="font-family:var(--font-heading);font-weight:500;font-size:13.5px">${ev.organizer_name}</div><div style="font-size:12px;color:var(--color-neutral-500)">Verified organizer</div></div>
       </div>
     </div>
     <div style="width:320px;flex:none;position:sticky;top:90px;${PANEL}">
@@ -890,10 +906,10 @@ function eventView() {
       <div style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--color-neutral-400)">
         <div>${ev.available} available · ${ev.locked} on hold · ${ev.sold} sold</div>
         <div>Capacity ${ev.total_capacity}</div>
-        <div>Up to ${CONFIG.freeWithoutId} tickets per booking without ID; more need each attendee’s ID (BR24)</div>
+        <div>Up to ${CONFIG.freeWithoutId} tickets per booking without ID; more need each attendee’s ID</div>
       </div>
       <button data-click="${() => go('customer', 'seats')}" ${!onSale || full ? html`disabled` : ''} class="btn btn-primary btn-block">${!onSale ? 'Not on sale' : full ? 'Sold out' : 'Choose seats'}</button>
-      <div style="font-size:11.5px;line-height:1.6;color:var(--color-neutral-500)">Reserving locks your picks for ${CONFIG.holdMinutes} minutes while you pay. Unpaid holds return to sale automatically (BR17, BR18).</div>
+      <div style="font-size:11.5px;line-height:1.6;color:var(--color-neutral-500)">Reserving locks your picks for ${CONFIG.holdMinutes} minutes while you pay. Unpaid holds return to sale automatically.</div>
     </div>
   </div>
 </div>`;
@@ -914,6 +930,8 @@ function seatsView() {
   const legend = (style, label) => html`<div style="display:flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;${style}"></span>${label}</div>`;
   const att = i => S.attendees[i] || { name: '', idn: '' };
   const setAtt = (i, k) => e => setState({ attendees: Object.assign({}, S.attendees, { [i]: Object.assign({}, att(i), { [k]: e.target.value }) }) });
+  // BR16: standing places have a zone and no seat number. BR24: tickets after
+  // the 2nd need attendee details. BR21: prices are frozen when the booking is made.
   return html`
 <div class="pane" data-key="seats" style="display:flex;flex-wrap:wrap;gap:var(--space-8);align-items:flex-start">
   <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:var(--space-6)">
@@ -949,7 +967,7 @@ function seatsView() {
       <h4 style="font-size:15px;margin:0">Standing zones</h4>
       ${zones.map(g => html`
       <div style="display:flex;align-items:center;gap:var(--space-4);padding:var(--space-4) var(--space-6);border:1px solid var(--color-neutral-800);border-radius:var(--radius-md);background:var(--color-surface)">
-        <div style="flex:1;min-width:0"><div style="font-family:var(--font-heading);font-weight:500;font-size:14px">${g.zone}</div><div style="font-size:12px;color:var(--color-neutral-500)">${g.type} · ${baht(g.price)} · ${g.free.length} of ${g.units.length} free · no seat number (BR16)</div></div>
+        <div style="flex:1;min-width:0"><div style="font-family:var(--font-heading);font-weight:500;font-size:14px">${g.zone}</div><div style="font-size:12px;color:var(--color-neutral-500)">${g.type} · ${baht(g.price)} · ${g.free.length} of ${g.units.length} free · no seat number</div></div>
         <div class="seg"><button data-click="${() => stepStanding(g, -1)}" style="${seg(false)}">−</button><span style="padding:5px 12px;font-size:13px;font-variant-numeric:tabular-nums">${S.standing[g.key] || 0}</span><button data-click="${() => stepStanding(g, 1)}" style="${seg(false)}">+</button></div>
       </div>`)}
     </div>` : ''}
@@ -970,12 +988,12 @@ function seatsView() {
         <input value="${att(i).idn}" data-input="${setAtt(i, 'idn')}" class="input" placeholder="ID number" style="font-size:12.5px;${MONO};border-color:${bd(S.attTouched && !att(i).idn.trim())}">
       </div>` : ''}
     </div>`)}
-    ${chosen.length > CONFIG.freeWithoutId ? html`<div style="font-size:11.5px;color:var(--color-accent-300)">BR24: tickets after the 2nd need the attendee’s name and ID number, and an ID can hold one ticket per event.</div>` : ''}
+    ${chosen.length > CONFIG.freeWithoutId ? html`<div style="font-size:11.5px;color:var(--color-accent-300)">Tickets after the 2nd need the attendee’s name and ID number, and an ID can hold one ticket per event.</div>` : ''}
     <div style="display:flex;gap:var(--space-3)"><input value="${S.code}" data-input="${e => setState({ code: e.target.value.toUpperCase() })}" class="input" placeholder="Promotion code (optional)" style="flex:1;${MONO};text-transform:uppercase"></div>
     <div style="font-size:11.5px;color:var(--color-neutral-600)">Valid today: ${S.promos.filter(p => p.active_today).map(p => p.coupon_code).join(' · ') || 'none'}</div>
     <div style="height:1px;background:var(--color-divider)"></div>
     <div style="display:flex;justify-content:space-between;font-family:var(--font-heading);font-weight:500;font-size:16px"><span>Subtotal</span><span>${baht(subtotal)}</span></div>
-    <div style="font-size:11.5px;color:var(--color-neutral-500)">The database works out the discount and fixes every price when you reserve (BR21).</div>
+    <div style="font-size:11.5px;color:var(--color-neutral-500)">The database works out the discount and fixes every price when you reserve.</div>
     <button data-click="${reserve}" ${!chosen.length || S.busy ? html`disabled` : ''} class="btn btn-primary btn-block">${S.busy ? 'Reserving…' : 'Reserve & hold ' + CONFIG.holdMinutes + ' min'}</button>
   </div>
 </div>`;
@@ -993,10 +1011,11 @@ function itemRows(b) {
 function totals(b, size) {
   const sub = b.items.reduce((t, it) => t + it.price_paid, 0), paid = paidSoFar(b);
   const line = (l, r, c) => html`<div style="display:flex;justify-content:space-between;color:${c || 'var(--color-neutral-400)'}"><span>${l}</span><span>${r}</span></div>`;
+  // BR8: at most one promotion per booking.
   return html`
 <div style="display:flex;flex-direction:column;gap:5px;font-size:12.5px">
   ${line(plural(b.items.length, 'ticket'), baht(sub))}
-  ${b.discount_amount_applied > 0 ? line((b.coupon_code || 'Promotion') + ' (BR8)', '−' + baht(b.discount_amount_applied), 'var(--color-accent-300)') : ''}
+  ${b.discount_amount_applied > 0 ? line(b.coupon_code || 'Promotion', '−' + baht(b.discount_amount_applied), 'var(--color-accent-300)') : ''}
   <div style="display:flex;justify-content:space-between;padding-top:var(--space-3);margin-top:var(--space-2);border-top:1px solid var(--color-divider);font-family:var(--font-heading);font-weight:500;font-size:${size}"><span>Total</span><span>${baht(b.total_amount)}</span></div>
   ${paid > 0 ? line('Paid so far', baht(paid)) : ''}
   ${b.booking_status === 'Pending' && paid > 0 ? line('Still due', baht(remainingOf(b)), 'var(--color-accent-300)') : ''}
@@ -1007,11 +1026,13 @@ function checkoutView() {
   const S = state, b = S.booking, ev = S.event;
   if (!b) return html`<div class="pane" data-key="checkout" style="${EMPTY}">No booking open. <button data-click="${() => go('customer', 'mine')}" class="btn btn-ghost" style="font-size:13px">My reservations</button></div>`;
   const pending = b.booking_status === 'Pending';
+  // BR18: an unpaid hold expires. BR19: Paid once Successful payments cover the
+  // total (split payments allowed). BR6: many payments per booking. BR7: one ticket per unit.
   return html`
 <div class="pane" data-key="checkout" style="display:flex;flex-wrap:wrap;gap:var(--space-8);align-items:flex-start">
   <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:var(--space-6)">
     <div style="display:flex;align-items:center;gap:var(--space-3)"><h1 style="font-size:28px;margin:0">Checkout</h1>${statusPill(b.booking_status)}</div>
-    ${!pending ? html`<div style="${NOTE}">Booking #${b.booking_id} is ${b.booking_status}. ${b.booking_status === 'Expired' ? 'The ' + CONFIG.holdMinutes + '-minute hold ran out before it was paid, so its units went back on sale (BR18).' : ''}</div>` : ''}
+    ${!pending ? html`<div style="${NOTE}">Booking #${b.booking_id} is ${b.booking_status}. ${b.booking_status === 'Expired' ? 'The ' + CONFIG.holdMinutes + '-minute hold ran out before it was paid, so its units went back on sale.' : ''}</div>` : ''}
     <div style="display:flex;flex-direction:column;gap:var(--space-3)">
       <h6 style="margin:0;color:var(--color-neutral-500)">1 · Your tickets — booking #${b.booking_id}</h6>
       ${itemRows(b)}
@@ -1024,11 +1045,11 @@ function checkoutView() {
         ${field('Amount (฿)', S.pay.amount, set('pay', 'amount'), { type: 'number' })}
         <div class="field"><label>Result (sample data — no real gateway)</label><div class="seg">${['Successful', 'Failed', 'Pending'].map(st => html`<button data-click="${() => setState({ pay: Object.assign({}, S.pay, { status: st }) })}" style="${seg(S.pay.status === st)}">${st}</button>`)}</div></div>
       </div>
-      <div style="font-size:11.5px;color:var(--color-neutral-500)">BR19: the booking is Paid once its Successful payments add up to the total. You can split it across several payments.</div>
+      <div style="font-size:11.5px;color:var(--color-neutral-500)">The booking is Paid once its Successful payments add up to the total. You can split it across several payments.</div>
     </div>` : ''}
     ${b.payments.length ? html`
     <div style="display:flex;flex-direction:column;gap:var(--space-3)">
-      <h6 style="margin:0;color:var(--color-neutral-500)">Payments on this booking (BR6)</h6>
+      <h6 style="margin:0;color:var(--color-neutral-500)">Payments on this booking</h6>
       <table class="table"><thead><tr><th>#</th><th>Method</th><th>Amount</th><th>When</th><th>Status</th></tr></thead>
       <tbody>${b.payments.map(p => html`<tr><td>${p.payment_id}</td><td>${p.payment_method}</td><td>${baht(p.amount)}</td><td>${whenLabel(p.paid_at)}</td><td>${statusPill(p.payment_status)}</td></tr>`)}</tbody></table>
     </div>` : ''}
@@ -1038,7 +1059,7 @@ function checkoutView() {
     <div style="height:1px;background:var(--color-divider)"></div>
     ${totals(b, '18px')}
     ${pending ? html`<button data-click="${payNow}" ${S.busy ? html`disabled` : ''} class="btn btn-primary btn-block">${S.busy ? 'Recording…' : 'Pay ' + baht(Number(S.pay.amount) || 0) + ' · ' + S.pay.method}</button>
-    <div style="font-size:11.5px;line-height:1.6;color:var(--color-neutral-500)">Payment turns the ${CONFIG.holdMinutes}-minute hold into Sold units and issues one ticket per unit (BR7, BR18).</div>
+    <div style="font-size:11.5px;line-height:1.6;color:var(--color-neutral-500)">Payment turns the ${CONFIG.holdMinutes}-minute hold into Sold units and issues one ticket per unit.</div>
     <button data-click="${() => cancelBooking(b.booking_id)}" class="btn btn-ghost" style="font-size:12px;align-self:flex-start">Cancel this booking</button>` : html`
     <button data-click="${() => go('customer', 'mine')}" class="btn btn-secondary btn-block">My reservations</button>`}
   </div>
@@ -1051,12 +1072,14 @@ function confirmView() {
   if (b.booking_status !== 'Paid') return checkoutView();
   const first = b.items[0] || {};
   const cell = (label, value) => html`<div><div style="font-size:11px;color:var(--color-neutral-500)">${label}</div><div>${value}</div></div>`;
+  // BR7, BR12, BR20: each sold unit gets exactly one ticket, only after payment,
+  // and can never be sold again.
   return html`
 <div class="pane" data-key="confirm" style="display:flex;flex-direction:column;align-items:center;gap:var(--space-8);padding-top:var(--space-8)">
   <div style="display:flex;flex-direction:column;align-items:center;gap:var(--space-3);text-align:center">
     <div style="width:44px;height:44px;border-radius:50%;border:1px solid var(--color-accent);color:var(--color-accent);display:flex;align-items:center;justify-content:center;font-size:19px">✓</div>
     <h1 style="font-size:28px;margin:0">Paid — ${plural(b.items.length, 'ticket')} ${b.items.length > 1 ? 'are' : 'is'} yours</h1>
-    <div style="font-size:13.5px;color:var(--color-neutral-400);max-width:56ch">The hold is gone and every unit is Sold for good. Each one got exactly one ticket code (BR7, BR12, BR20).</div>
+    <div style="font-size:13.5px;color:var(--color-neutral-400);max-width:56ch">The hold is gone and every unit is Sold for good. Each one got exactly one ticket code.</div>
   </div>
   <div style="display:flex;flex-wrap:wrap;width:min(700px,100%);border:1px solid var(--color-neutral-800);border-radius:var(--radius-lg);background:var(--color-surface);overflow:hidden;box-shadow:var(--shadow-md)">
     <div style="flex:1;min-width:260px;padding:var(--space-8);display:flex;flex-direction:column;gap:var(--space-4)">
@@ -1082,9 +1105,10 @@ function mineView() {
   const tabs = ['Pending', 'Paid', 'Expired', 'Cancelled'];
   const list = S.mine.filter(b => b.booking_status === S.mineTab);
   const user = S.user;
+  // BR4: every booking belongs to exactly one user.
   return html`
 <div class="pane" data-key="mine" style="display:flex;flex-direction:column;gap:var(--space-6)">
-  ${h1('My reservations', user ? user.full_name + ' · ' + user.email + ' — every booking belongs to exactly one user (BR4)' : '')}
+  ${h1('My reservations', user ? user.full_name + ' · ' + user.email : '')}
   <div style="display:flex;gap:var(--space-2);flex-wrap:wrap">${tabs.map(t => html`<button data-click="${() => setState({ mineTab: t })}" style="${chip(S.mineTab === t)}">${t} · ${S.mine.filter(b => b.booking_status === t).length}</button>`)}</div>
   ${!list.length ? html`<div style="${EMPTY}">Nothing here. <button data-click="${() => go('customer', 'browse')}" class="btn btn-ghost" style="font-size:13px">Find an event</button></div>` : ''}
   ${list.map(b => html`
@@ -1104,6 +1128,8 @@ function authView() {
   const S = state, e = S.regTouched ? regErrors(S.reg) : {};
   const le = S.loginTouched ? { email: EMAIL_RE.test(S.login.email.trim()) ? '' : 'Enter a valid email.', password: S.login.password ? '' : 'Enter your password.' } : {};
   if (S.user) return html`<div class="pane" data-key="auth" style="${EMPTY}">Logged in as ${S.user.full_name} (${S.user.email}). <button data-click="${logOut}" class="btn btn-ghost" style="font-size:13px">Log out</button></div>`;
+  // BR13: a new organizer starts Pending until an admin verifies it.
+  // BR15: each email registers once.
   return html`
 <div class="pane" data-key="auth" style="display:flex;flex-wrap:wrap;justify-content:center;gap:var(--space-8);padding-top:var(--space-8)">
   <div data-key="login" style="width:min(400px,100%);padding:var(--space-8);border-radius:var(--radius-lg);${PANEL}">
@@ -1119,14 +1145,14 @@ function authView() {
     <div class="seg" style="align-self:flex-start;font-size:12.5px">${[['customer', 'To book tickets'], ['organizer', 'To host events']].map(([k, label]) =>
       html`<button data-click="${() => setState({ regAs: k })}" style="${seg(S.regAs === k)}">${label}</button>`)}</div>
     ${S.regAs === 'organizer' ? html`
-    <div style="font-size:12.5px;line-height:1.6;color:var(--color-neutral-400)">Creates your login and your organizer together. You can log in to Host right away and create events once an admin verifies the organizer (BR13).</div>
+    <div style="font-size:12.5px;line-height:1.6;color:var(--color-neutral-400)">Creates your login and your organizer together. You can log in to Host right away and create events once an admin verifies the organizer.</div>
     ${field('Organizer name', S.reg.organizer_name, set('reg', 'organizer_name'), { placeholder: 'Photography Club', error: e.organizer_name })}` : ''}
     ${field(S.regAs === 'organizer' ? 'Your name' : 'Full name', S.reg.full_name, set('reg', 'full_name'), { placeholder: 'Somchai Jaidee', error: e.full_name })}
     ${field('Email', S.reg.email, set('reg', 'email'), { type: 'email', placeholder: 'you@student.example.ac.th', error: e.email })}
     ${field('Phone (optional)', S.reg.phone_number, set('reg', 'phone_number'), { placeholder: '0812345678' })}
     ${field('Password', S.reg.password, set('reg', 'password'), { type: 'password', placeholder: 'At least 8 characters', error: e.password })}
     <button data-click="${register}" ${S.authBusy ? html`disabled` : ''} class="btn btn-primary btn-block">${S.regAs === 'organizer' ? 'Create organizer account' : 'Create account & continue'}</button>
-    <div style="font-size:11.5px;color:var(--color-neutral-500)">Each email can register once (BR15).</div>
+    <div style="font-size:11.5px;color:var(--color-neutral-500)">Each email can register once.</div>
   </div>
 </div>`;
 }
@@ -1136,13 +1162,14 @@ function authView() {
 function organizerPicker() {
   const S = state, org = currentOrganizer();
   // An Organizer always acts as their own organizer; only admins can switch.
+  // BR13: an organizer that is not Verified cannot create events.
   if (!isAdmin()) return html`
 <div style="display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap">
   <span style="font-size:12px;color:var(--color-neutral-400)">Hosting as</span>
   <span style="font-family:var(--font-heading);font-weight:500;font-size:14px">${org ? org.organizer_name : 'no organizer'}</span>
   ${org ? statusPill(org.verification_status) : ''}
 </div>
-${org && org.verification_status !== 'Verified' ? html`<div style="${NOTE};border-color:var(--color-accent-700);color:var(--color-accent-300)">BR13: ${org.organizer_name} is ${org.verification_status}. An administrator must verify it before it can create events.</div>` : ''}`;
+${org && org.verification_status !== 'Verified' ? html`<div style="${NOTE};border-color:var(--color-accent-700);color:var(--color-accent-300)">${org.organizer_name} is ${org.verification_status}. An administrator must verify it before it can create events.</div>` : ''}`;
   return html`
 <div style="display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap">
   <label style="font-size:12px;color:var(--color-neutral-400)">Acting as</label>
@@ -1151,21 +1178,22 @@ ${org && org.verification_status !== 'Verified' ? html`<div style="${NOTE};borde
   </select>
   ${org ? statusPill(org.verification_status) : ''}
 </div>
-${org && org.verification_status !== 'Verified' ? html`<div style="${NOTE};border-color:var(--color-accent-700);color:var(--color-accent-300)">BR13: ${org.organizer_name} is ${org.verification_status}. An administrator must verify it before it can create events.</div>` : ''}`;
+${org && org.verification_status !== 'Verified' ? html`<div style="${NOTE};border-color:var(--color-accent-700);color:var(--color-accent-300)">${org.organizer_name} is ${org.verification_status}. An administrator must verify it before it can create events.</div>` : ''}`;
 }
 
 function dashView() {
   const S = state, org = currentOrganizer();
   const mine = S.allEvents.filter(e => org && e.organizer_id === org.organizer_id);
   const units = mine.reduce((t, e) => t + e.units, 0), sold = mine.reduce((t, e) => t + e.sold, 0), locked = mine.reduce((t, e) => t + e.locked, 0);
+  // BR1: an organizer sees only its own events. BR17: holds last 5 minutes.
   return html`
 <div class="pane" data-key="dash" style="display:flex;flex-direction:column;gap:var(--space-8)">
   <div style="display:flex;align-items:baseline;gap:var(--space-4);flex-wrap:wrap"><h1 style="font-size:28px;margin:0">Dashboard</h1><div style="font-size:12.5px;color:var(--color-neutral-500)">live from the database</div><button data-click="${() => go('organizer', 'create')}" class="btn btn-primary" style="margin-left:auto">+ Create event</button></div>
   ${organizerPicker()}
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:var(--space-4)">
-    ${kpi('Events', String(mine.length), mine.filter(e => e.event_status === 'On_sale').length + ' on sale (BR1)')}
+    ${kpi('Events', String(mine.length), mine.filter(e => e.event_status === 'On_sale').length + ' on sale')}
     ${kpi('Units sold', String(sold), 'of ' + units + ' admission units')}
-    ${kpi('On hold now', String(locked), 'locked for ' + CONFIG.holdMinutes + ' min (BR17)')}
+    ${kpi('On hold now', String(locked), 'locked for ' + CONFIG.holdMinutes + ' min')}
     ${kpi('Sell-through', (units ? Math.round(sold / units * 100) : 0) + '%', mine.filter(e => e.units && e.sold === e.units).length + ' sold out')}
   </div>
   <div style="display:flex;flex-wrap:wrap;gap:var(--space-6);align-items:flex-start">
@@ -1214,6 +1242,9 @@ function createView() {
   const toggle = name => () => setState({ n: Object.assign({}, n, { types: Object.assign({}, n.types, { [name]: Object.assign({}, n.types[name], { on: !n.types[name].on }) }) }) });
   const box = on => 'width:16px;height:16px;flex:none;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:10px;border:1px solid ' + (on ? 'var(--color-accent)' : 'var(--color-neutral-700)') + ';background:' + (on ? 'var(--color-accent)' : 'transparent') + ';color:' + (on ? 'var(--color-accent-900)' : 'transparent');
   const check = (ok, text) => html`<div style="display:flex;gap:var(--space-2);font-size:11.5px;color:${ok ? 'var(--color-accent-300)' : 'var(--color-neutral-500)'}"><span>${ok ? '✓' : '○'}</span><span>${text}</span></div>`;
+  // The checklist mirrors the database checks: BR13 verified organizer, BR11 a
+  // ticket type with units, BR21 price > 0, BR16 row + seat unique, BR22 units
+  // <= capacity, BR23 future date, BR10/BR25 every unit seated or standing.
   return html`
 <div class="pane" data-key="create" style="display:flex;flex-direction:column;gap:var(--space-6)">
   ${h1('Create an event', 'Creates a Draft with all its admission units. Open it for sale from the dashboard when you are ready.')}
@@ -1264,13 +1295,13 @@ function createView() {
       </div>
       <h6 style="margin:0;color:var(--color-neutral-500)">Checks the database will run</h6>
       <div style="${NOTE};display:flex;flex-direction:column;gap:6px">
-        ${check(org && org.verification_status === 'Verified', 'BR13 — organizer is verified')}
-        ${check(p.types.length > 0, 'BR11 — at least one ticket type with units')}
-        ${check(p.types.length > 0 && p.types.every(t => t.price > 0), 'BR21 — every price is above zero')}
-        ${check(!p.dupRow, 'BR16 — each row + seat is unique in the event')}
-        ${check(cap > 0 && p.total <= cap, 'BR22 — units ≤ total capacity')}
-        ${check(n.date && new Date(n.date + 'T' + (n.time || '00:00')) > new Date(), 'BR23 — the event is in the future')}
-        ${check(p.types.length > 0 && p.types.every(t => t.seats || t.standing), 'BR10/BR25 — every unit is seated or standing')}
+        ${check(org && org.verification_status === 'Verified', 'Organizer is verified')}
+        ${check(p.types.length > 0, 'At least one ticket type with units')}
+        ${check(p.types.length > 0 && p.types.every(t => t.price > 0), 'Every price is above zero')}
+        ${check(!p.dupRow, 'Each row + seat is unique in the event')}
+        ${check(cap > 0 && p.total <= cap, 'Units ≤ total capacity')}
+        ${check(n.date && new Date(n.date + 'T' + (n.time || '00:00')) > new Date(), 'The event is in the future')}
+        ${check(p.types.length > 0 && p.types.every(t => t.seats || t.standing), 'Every unit is seated or standing')}
       </div>
     </div>
   </div>
@@ -1281,13 +1312,15 @@ function offerView() {
   const S = state, g = S.g, e = S.gTouched ? offerErrors(g) : {}, v = Number(g.value) || 0, base = 1000;
   const raw = g.type === 'Amount' ? v : base * v / 100;
   const disc = Math.min(base, g.type === 'Percent' && Number(g.cap) > 0 ? Math.min(raw, Number(g.cap)) : raw);
+  // BR26: a promotion is exactly one of Amount / Percent. BR8: one per booking.
+  // BR22: valid only between its dates. BR21: the discount is frozen on the booking.
   return html`
 <div class="pane" data-key="offer" style="display:flex;flex-direction:column;gap:var(--space-6)">
   ${h1('Create a promotion', 'A promotion works on any event while its dates are valid. Customers enter its code when they reserve.')}
   <div style="display:flex;flex-wrap:wrap;gap:var(--space-8);align-items:flex-start">
     <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:var(--space-6)">
       <div style="display:flex;flex-direction:column;gap:var(--space-3)">
-        <label style="font-size:12px;color:var(--color-neutral-400)">Discount type — a promotion is exactly one of these (BR26)</label>
+        <label style="font-size:12px;color:var(--color-neutral-400)">Discount type — a promotion is exactly one of these</label>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:var(--space-3)">
           ${[['Amount', 'Amount_Discount', 'a flat baht amount off the booking'], ['Percent', 'Percent_Discount', 'a share of the booking, with an optional cap']].map(([key, label, note]) =>
             html`<button data-click="${() => setState({ g: Object.assign({}, g, { type: key }) })}" style="${card(g.type === key)}"><div style="font-family:var(--font-heading);font-weight:500;font-size:13.5px">${label}</div><div style="font-size:11px;color:var(--color-neutral-500)">${note}</div></button>`)}
@@ -1315,7 +1348,7 @@ function offerView() {
         <div style="display:flex;justify-content:space-between;color:var(--color-accent-300)"><span>${g.code.trim() || 'CODE'} (${g.type === 'Amount' ? '−' + baht(v) : '−' + v + '%'})</span><span>−${baht(disc)}</span></div>
         <div style="display:flex;justify-content:space-between;font-family:var(--font-heading);font-weight:500;font-size:15px"><span>Total</span><span>${baht(base - disc)}</span></div>
       </div>
-      <div style="${NOTE}">One promotion per booking (BR8), only on bookings made between the start and end dates (BR22). The discount given is stored with the booking and never recalculated (BR21).</div>
+      <div style="${NOTE}">One promotion per booking, only on bookings made between the start and end dates. The discount given is stored with the booking and never recalculated.</div>
     </div>
   </div>
   <div style="display:flex;flex-direction:column;gap:var(--space-4)">
@@ -1338,12 +1371,13 @@ function salesView() {
   const max = Math.max(1, ...days.map(d => d.tickets_sold));
   const tickets = days.reduce((t, d) => t + d.tickets_sold, 0), gross = days.reduce((t, d) => t + Number(d.gross), 0);
   const rev = S.revenue;
+  // BR21: gross uses the frozen price_paid. BR19: only Successful payments count.
   return html`
 <div class="pane" data-key="sales" style="display:flex;flex-direction:column;gap:var(--space-8)">
   ${h1('Sales — last 30 days', 'O1: every unit sold, with its sale time and price.')}
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:var(--space-4)">
     ${kpi('Tickets sold', String(tickets), 'last 30 days')}
-    ${kpi('Gross before discounts', baht(gross), 'sum of price_paid (BR21)')}
+    ${kpi('Gross before discounts', baht(gross), 'sum of price_paid')}
     ${kpi('Busiest day', String(Math.max(...days.map(d => d.tickets_sold))), 'tickets in one day')}
   </div>
   <div style="display:flex;flex-wrap:wrap;gap:var(--space-6);align-items:stretch">
@@ -1362,7 +1396,7 @@ function salesView() {
       ${rev.by_method.map(m => html`<div style="display:flex;flex-direction:column;gap:4px"><div style="display:flex;justify-content:space-between;font-size:12px;color:var(--color-neutral-400)"><span>${m.payment_method} · ${plural(m.bookings, 'booking')}</span><span>${baht(m.collected)}</span></div>${bar(rev.total ? Math.round(m.collected / rev.total * 100) : 0)}</div>`)}
       ${!rev.by_method.length ? html`<div style="font-size:12px;color:var(--color-neutral-500)">No successful payments yet.</div>` : ''}
       <div style="display:flex;justify-content:space-between;font-family:var(--font-heading);font-weight:500;font-size:15px;padding-top:var(--space-2);border-top:1px solid var(--color-divider)"><span>Collected</span><span>${baht(rev.total)}</span></div>` : ''}
-      <div style="font-size:11.5px;line-height:1.6;color:var(--color-neutral-500)">Only Successful payments count (BR19).</div>
+      <div style="font-size:11.5px;line-height:1.6;color:var(--color-neutral-500)">Only Successful payments count.</div>
     </div>
   </div>
   <div style="display:flex;flex-direction:column;gap:var(--space-4)">
@@ -1378,9 +1412,11 @@ function salesView() {
 
 function seatStatusView() {
   const rows = state.reports.seats;
+  // BR14: units are Available / Locked / Sold. BR17, BR18: Locked units are holds
+  // that expire within 5 minutes.
   return html`
 <div class="pane" data-key="seatstatus" style="display:flex;flex-direction:column;gap:var(--space-6)">
-  ${h1('Seat status', 'O2: Available / Locked / Sold for every event (BR14), and which events are full.')}
+  ${h1('Seat status', 'O2: Available / Locked / Sold for every event, and which events are full.')}
   <table class="table">
     <thead><tr><th>Event</th><th>Status</th><th>Capacity</th><th>Available</th><th>Locked</th><th>Sold</th><th style="width:180px">Sold share</th><th>Full</th></tr></thead>
     <tbody>${rows.map(e => {
@@ -1388,17 +1424,18 @@ function seatStatusView() {
       return html`<tr><td>${e.event_name}</td><td>${statusPill(e.event_status)}</td><td>${e.total_capacity}</td><td>${e.available}</td><td>${e.locked}</td><td>${e.sold}</td><td>${bar(pct)}</td><td>${e.is_full ? html`<span style="${pill('ok')}">Full</span>` : html`<span style="${pill('quiet')}">No</span>`}</td></tr>`;
     })}</tbody>
   </table>
-  <div style="${NOTE}">Events with no admission units yet are left out. Locked units belong to holds that end within ${CONFIG.holdMinutes} minutes (BR17, BR18).</div>
+  <div style="${NOTE}">Events with no admission units yet are left out. Locked units belong to holds that end within ${CONFIG.holdMinutes} minutes.</div>
 </div>`;
 }
 
 function usageView() {
   const rows = state.reports.usage;
+  // BR26: each promotion is either Amount or Percent.
   return html`
 <div class="pane" data-key="usage" style="display:flex;flex-direction:column;gap:var(--space-6)">
   ${h1('Promotion usage', 'O4: each promotion, its valid period, and how many paid bookings used it.')}
   <table class="table">
-    <thead><tr><th>Code</th><th>Type (BR26)</th><th>Valid</th><th>Times used</th><th>Discount given</th></tr></thead>
+    <thead><tr><th>Code</th><th>Type</th><th>Valid</th><th>Times used</th><th>Discount given</th></tr></thead>
     <tbody>${rows.map(p => html`<tr><td style="${MONO}">${p.coupon_code}</td><td>${p.discount_type}</td><td>${dayLabel(p.start_date)} – ${dayLabel(p.end_date)}</td><td>${p.times_used}</td><td>${baht(p.total_discount_given)}</td></tr>`)}</tbody>
   </table>
 </div>`;
@@ -1406,9 +1443,10 @@ function usageView() {
 
 function holdsView() {
   const S = state, r = S.reports, gone = Math.floor((S.now - r.fetchedAt) / 1000);
+  // BR17, BR18: Pending bookings hold their units for 5 minutes, then expire.
   return html`
 <div class="pane" data-key="holds" style="display:flex;flex-direction:column;gap:var(--space-6)">
-  ${h1('Unpaid holds', 'Bookings that are still Pending, how long they have waited, and when they expire (BR17, BR18).')}
+  ${h1('Unpaid holds', 'Bookings that are still Pending, how long they have waited, and when they expire.')}
   ${!r.pending.length ? html`<div style="${EMPTY}">No unpaid holds right now.</div>` : html`
   <table class="table">
     <thead><tr><th>Booking</th><th>User</th><th>Created</th><th>Waiting</th><th>Expires in</th><th>Total</th></tr></thead>
@@ -1422,10 +1460,11 @@ function holdsView() {
 
 function adminOrganizersView() {
   const S = state;
+  // BR13: only verified organizers can create events.
   return html`
 <div class="pane" data-key="aorg" style="display:flex;flex-wrap:wrap;gap:var(--space-8);align-items:flex-start">
   <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:var(--space-4)">
-    ${h1('Organizers', 'Only verified organizers can create events (BR13). The account registered with the contact email runs the organizer.')}
+    ${h1('Organizers', 'Only verified organizers can create events. The account registered with the contact email runs the organizer.')}
     <table class="table">
       <thead><tr><th>Organizer</th><th>Contact</th><th>Account</th><th>Status</th><th>Verified</th><th></th></tr></thead>
       <tbody>${S.organizers.map(o => html`<tr><td>${o.organizer_name}</td><td>${o.contact_email}</td><td style="white-space:nowrap">${o.user_id
@@ -1441,10 +1480,11 @@ function adminOrganizersView() {
 
 function adminUsersView() {
   const S = state, u = S.editUser;
+  // BR15: emails are unique.
   return html`
 <div class="pane" data-key="ausers" style="display:flex;flex-wrap:wrap;gap:var(--space-8);align-items:flex-start">
   <div style="flex:1;min-width:320px;display:flex;flex-direction:column;gap:var(--space-4)">
-    ${h1('Users', 'Correct a user’s details. Emails stay unique (BR15).')}
+    ${h1('Users', 'Correct a user’s details. Emails stay unique.')}
     <table class="table">
       <thead><tr><th>#</th><th>Name</th><th>Email</th><th>Phone</th><th>Role</th><th>Joined</th><th></th></tr></thead>
       <tbody>${S.users.map(x => html`<tr><td>${x.user_id}</td><td>${x.full_name}</td><td>${x.email}</td><td>${x.phone_number || '—'}</td><td>${x.role}</td><td>${dayLabel(x.created_at)}</td><td style="text-align:right"><button data-click="${() => setState({ editUser: Object.assign({}, x, { phone_number: x.phone_number || '' }) })}" class="btn btn-ghost" style="font-size:12px">Edit</button></td></tr>`)}</tbody>
@@ -1532,7 +1572,7 @@ setInterval(() => {
     get('/bookings/' + b.booking_id).then(nb => {
       setBooking(nb);
       if (nb.booking_status === 'Expired') {
-        say('The ' + CONFIG.holdMinutes + '-minute hold expired — those units went back on sale (BR18).', 5200);
+        say('The ' + CONFIG.holdMinutes + '-minute hold expired — those units went back on sale.', 5200);
         load('mine', 'event');
       } else if (nb.booking_status === 'Pending') {
         setState({ deadline: Date.now() + Math.max(1, nb.seconds_left) * 1000 });

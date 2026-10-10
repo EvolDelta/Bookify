@@ -205,14 +205,17 @@ router.patch('/:id/status', requireHost, async (req, res) => {
   res.json({ event_id: id, event_status: status });
 });
 
-// DELETE /api/events/:id — administrator (admin login required) removes a cancelled event that nobody booked.
-// Events with bookings are kept so sales history still adds up.
+// DELETE /api/events/:id — an administrator deletes a Draft or Cancelled event
+// that nobody ever booked. Events with bookings are kept so sales history still
+// adds up; live events must be cancelled first.
 router.delete('/:id', requireAdmin, async (req, res) => {
   const id = v.id(req.params.id, 'id');
   await transaction(async conn => {
     const [[ev]] = await conn.query('SELECT event_status FROM events WHERE event_id = ? FOR UPDATE', [id]);
     if (!ev) throw new HttpError(404, 'Event not found.');
-    if (ev.event_status !== 'Cancelled') throw new HttpError(409, 'Only Cancelled events can be removed. Cancel it first.');
+    if (ev.event_status !== 'Draft' && ev.event_status !== 'Cancelled') {
+      throw new HttpError(409, 'Only Draft or Cancelled events can be deleted. Cancel it first.');
+    }
     const [[{ n }]] = await conn.query(
       `SELECT COUNT(*) AS n FROM booking_items bi
        JOIN admission_units u ON u.unit_id = bi.unit_id

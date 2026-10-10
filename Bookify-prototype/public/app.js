@@ -639,10 +639,11 @@ async function saveUser() {
   load('users');
 }
 
-async function removeEvent(id) {
+async function removeEvent(id, name) {
+  if (!confirm('Delete "' + (name || 'this event') + '" permanently?\nIts ticket types and seats are deleted too. This cannot be undone.')) return;
   try {
     await api('DELETE', '/events/' + id);
-    say('Event removed.');
+    say('Event deleted.');
   } catch (err) { fail(err); }
   load('allEvents');
 }
@@ -1216,6 +1217,7 @@ function dashView() {
           ${e.event_status === 'Draft' || e.event_status === 'Closed' ? html`<button data-click="${() => setEventStatus(e.event_id, 'On_sale')}" class="btn btn-primary" style="font-size:12px">Open for sale</button>` : ''}
           ${e.event_status === 'On_sale' ? html`<button data-click="${() => setEventStatus(e.event_id, 'Closed')}" class="btn btn-secondary" style="font-size:12px">Close sales</button>` : ''}
           ${e.event_status !== 'Cancelled' ? html`<button data-click="${() => setEventStatus(e.event_id, 'Cancelled')}" class="btn btn-secondary" style="font-size:12px">Cancel</button>` : ''}
+          ${isAdmin() && (e.event_status === 'Draft' || e.event_status === 'Cancelled') ? html`<button data-click="${() => removeEvent(e.event_id, e.event_name)}" class="btn btn-secondary" style="font-size:12px;color:var(--color-accent-300)" title="Only events that were never booked can be deleted">Delete</button>` : ''}
         </div>
         </div>
       </div>`;
@@ -1509,7 +1511,7 @@ function adminEventsView() {
   <table class="table">
     <thead><tr><th>Event</th><th>Organizer</th><th>Date</th><th>Units</th><th>Sold</th><th>Status</th><th></th></tr></thead>
     <tbody>${S.allEvents.map(e => html`<tr><td>${e.event_name}</td><td>${e.organizer_name}</td><td>${whenLabel(e.event_date)}</td><td>${e.units}</td><td>${e.sold}</td><td>${statusPill(e.event_status)}</td><td style="text-align:right;white-space:nowrap">
-      ${e.event_status !== 'Cancelled' ? html`<button data-click="${() => setEventStatus(e.event_id, 'Cancelled')}" class="btn btn-ghost" style="font-size:12px">Cancel</button>` : html`<button data-click="${() => removeEvent(e.event_id)}" class="btn btn-secondary" style="font-size:12px">Remove</button>`}
+      ${e.event_status !== 'Cancelled' ? html`<button data-click="${() => setEventStatus(e.event_id, 'Cancelled')}" class="btn btn-ghost" style="font-size:12px">Cancel</button>` : html`<button data-click="${() => removeEvent(e.event_id, e.event_name)}" class="btn btn-secondary" style="font-size:12px">Remove</button>`}
     </td></tr>`)}</tbody>
   </table>
 </div>`;

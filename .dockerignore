@@ -1,0 +1,26 @@
+# Files that must NOT be copied into the container image.
+# Patterns start with **/ so they match inside Bookify-prototype/ too.
+
+# Installed inside the image by `npm ci` instead
+**/node_modules
+**/npm-debug.log*
+
+# Secrets: passwords and certificates are given to the container as
+# environment variables on the hosting platform, never baked into the image
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+
+# Not needed to run the app
+.git
+**/.gitignore
+Dockerfile
+.dockerignore
+**/docs
+**/coverage
+**/.vscode
+**/.idea
+**/.DS_Store
+**/Thumbs.db
+**/desktop.ini

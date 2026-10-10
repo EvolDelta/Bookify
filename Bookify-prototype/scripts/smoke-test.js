@@ -337,6 +337,15 @@ async function main() {
     assert.equal((await admin.call('DELETE', '/events/3')).status, 409);
     await admin.call('PATCH', '/events/3/status', { event_status: 'On_sale' });
   });
+  await check('admin deletes a Draft event directly (no need to cancel it first)', async () => {
+    const r = await admin.call('POST', '/events', {
+      organizer_id: 3, event_name: 'Typo draft', event_date: '2030-02-01 20:00', venue_name: 'Hall 2',
+      total_capacity: 5, ticket_types: [{ type_name: 'Normal', price: 100, zone_name: 'Lawn', quantity: 5 }] });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    assert.equal((await alice.call('DELETE', `/events/${r.body.event_id}`)).status, 403);   // customers cannot
+    assert.equal((await admin.call('DELETE', `/events/${r.body.event_id}`)).status, 204);
+    assert.equal((await admin.call('GET', `/events/${r.body.event_id}`)).status, 404);
+  });
   await check('an Organizer account hosts only its own organizer\'s events', async () => {
     // Log in as the seeded account that runs SE Music Society (organizer 1), with a password of our own.
     await pool.query('UPDATE users SET password_hash = ? WHERE email = ?', [await hashPassword('music-pass-123'), 'music@se.example.ac.th']);

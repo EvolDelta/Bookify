@@ -104,14 +104,14 @@ BEGIN
   END IF;
 END$$
 
--- BR22: a promotion only applies to a booking created inside its valid period.
+-- BR27: a promotion only applies to a booking created inside its valid period.
 CREATE TRIGGER trg_bookings_bi BEFORE INSERT ON bookings
 FOR EACH ROW
 BEGIN
   IF NEW.promo_id IS NOT NULL AND NOT EXISTS (
        SELECT 1 FROM promotions
        WHERE promo_id = NEW.promo_id AND DATE(NEW.created_at) BETWEEN start_date AND end_date) THEN
-    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR22: promotion is not valid on the booking date';
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'BR27: promotion is not valid on the booking date';
   END IF;
 END$$
 

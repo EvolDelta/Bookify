@@ -21,7 +21,7 @@ What lives where:
 | Folder / file | Purpose |
 |---|---|
 | `db/schema.sql` | Tables, keys, CHECK / UNIQUE / FOREIGN KEY constraints (milestone M4 DDL) |
-| `db/triggers.sql` | Rules that need to look at other rows (BR3, BR10–BR13, BR16, BR22–BR25) |
+| `db/triggers.sql` | Rules that need to look at other rows (BR3, BR10–BR13, BR16, BR22–BR25, BR27) |
 | `db/seed.sql` | Sample data (milestone M4 sample data) |
 | `db/queries.sql` | 12 report queries (milestone M5 needs ≥ 10) |
 | `src/services/bookings.js` | Lock → pay → sell flow, run as transactions (BR9, BR17–BR21) |
@@ -220,7 +220,7 @@ The **Database** column is the guarantee. The **API** column is either a second 
 | **BR11** | An event can go on sale only once it has at least one ticket type with units | `trg_events_bu` (when `event_status` changes to `On_sale`) | `POST /api/events` refuses an empty `ticket_types` list |
 | **BR13** | Only a verified organizer can create events | `trg_events_bi`. `ck_organizers_verified`: a Verified organizer must have `verified_at` | New organizers start **Pending** (`POST /api/auth/register-organizer`, `POST /api/organizers`). Only an admin can change `verification_status` (`PATCH /api/organizers/:id/verification`) |
 | **BR16** | A seated unit has a row and seat number, unique within the event. A standing unit has only a zone | `seated_units.row_label`, `seat_number NOT NULL`, `seat_number > 0`; `standing_units` has no row/seat columns at all, only `zone_name NOT NULL`. `trg_seated_units_bi` / `_bu` (via `check_seat_unique`) refuse a repeated row + seat anywhere in the same event | `POST /api/events` refuses a row label listed twice |
-| **BR22** (capacity) | An event never has more units than `total_capacity` | `trg_units_bi` | `POST /api/events` counts the units it is about to create first |
+| **BR22** | An event never has more units than `total_capacity` | `trg_units_bi` | `POST /api/events` counts the units it is about to create first |
 | **BR23** | An event is in the future, and nobody can book it once it has happened | `ck_events_future CHECK (event_date > created_at)`; `trg_booking_items_bi` refuses an item if the booking was made on or after the event date | `createBooking()` refuses events whose `event_date` has passed. Only `On_sale` events can be booked |
 
 #### Bookings, payments and tickets
@@ -233,7 +233,6 @@ The **Database** column is the guarantee. The **API** column is either a second 
 | **BR19** | Payment amounts are above zero, and a booking becomes Paid once its **Successful** payments cover the total (it may be split over several payments; Failed and Pending ones don't count) | `ck_payments_amount CHECK (amount > 0)` | `payBooking()` sums the Successful payments and, when they reach `total_amount`, marks the booking Paid, the items sold and the units Sold, then issues tickets |
 | **BR20** | A unit is sold once and only once | Generated column `sold_unit_id` + `UNIQUE (sold_unit_id)` (see idea 2) | — |
 | **BR21** | Prices are above zero, and the price and discount a customer gets are frozen on the booking | `ck_ett_price`, `ck_items_price` (`> 0`); `booking_items.price_paid` and `bookings.discount_amount_applied` store copies | `createBooking()` copies each unit's current price into `price_paid` and works out the discount once, when the booking is made. Later price changes never touch existing bookings |
-| **BR22** (promotions) | A promotion applies only to bookings made between its start and end dates | `trg_bookings_bi`; `ck_promotions_period CHECK (end_date >= start_date)` | `createBooking()` looks the code up only among promotions valid today |
 | **BR24** | Up to 2 tickets per booking need no ID. Every ticket after the 2nd needs `attendee_name` and `identity_number`, and one `identity_number` can hold only one ticket per event (counting Pending and Paid bookings) | `trg_booking_items_bi` | `POST /api/bookings` checks the attendee details first. `createBooking()` inserts the items without details first, so the ones with details are the 3rd and later rows the trigger checks. `FREE_SEATS_WITHOUT_ID = 2` |
 
 #### Values, uniqueness and promotions
@@ -243,6 +242,7 @@ The **Database** column is the guarantee. The **API** column is either a second 
 | **BR14** | Status and type columns only take their allowed values | `ENUM` columns: `event_status`, `unit_kind`, `unit_status`, `booking_status`, `payment_method`, `payment_status`, `type_name`, `discount_type`, plus `role` and `verification_status` | `v.oneOf()` in `src/validate.js` refuses other values with a clear message before the SQL runs |
 | **BR15** | Things that identify something are unique | `UNIQUE` on `users.email`, `tickets.ticket_code`, `ticket_type_catalog.type_name` and `event_ticket_types (event_id, type_id)`. Also unique, though not tagged: `promotions.coupon_code`, `organizers.contact_email`, `organizers.user_id` | `POST /api/auth/register` turns a duplicate email into *"An account with that email already exists."* |
 | **BR26** | Promotions are specialised into Amount and Percent discounts. Every promotion is exactly one of them | **Disjoint:** `amount_discounts` / `percent_discounts` use the same fixed-`discount_type` + composite-FK pattern as BR25. Their values are checked too (`discount_amount > 0`, `0 < discount_percent <= 100`, `max_discount_cap > 0`) | **Total:** `POST /api/promotions` inserts the promotion and its one subtype row in one transaction. `discountFor()` applies the amount, or the percent up to its cap |
+| **BR27** | A promotion applies only to bookings made between its start and end dates | `trg_bookings_bi`; `ck_promotions_period CHECK (end_date >= start_date)` | `createBooking()` looks the code up only among promotions valid today |
 
 ### How a broken rule reaches the user
 

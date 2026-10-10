@@ -195,7 +195,7 @@ async function main() {
     assert.equal(r.body.total_amount, 2100);
     assert.equal(r.body.coupon_code, 'SE20');
   });
-  await check('expired promotion is refused (BR22)', async () => {
+  await check('expired promotion is refused (BR27)', async () => {
     const r = await cara.call('POST', '/bookings', { units: [{ unit_id: 6 }], promo_code: 'OLDPROMO' });
     assert.equal(r.status, 400);
   });

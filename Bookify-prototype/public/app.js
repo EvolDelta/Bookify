@@ -807,7 +807,7 @@ function browseView() {
   const live = S.promos.filter(p => p.active_today);
   const pi = Math.min(S.promo, Math.max(0, live.length - 1)), po = live[pi];
   const step = d => () => setState({ promo: (pi + d + live.length) % Math.max(1, live.length) });
-  // BR8: one promotion per booking. BR22: only inside its start and end dates.
+  // BR8: one promotion per booking. BR27: only inside its start and end dates.
   return html`
 <div class="pane" data-key="browse" style="display:flex;flex-direction:column;gap:var(--space-8)">
   <div style="display:flex;align-items:stretch;gap:var(--space-4)">
@@ -1313,7 +1313,7 @@ function offerView() {
   const raw = g.type === 'Amount' ? v : base * v / 100;
   const disc = Math.min(base, g.type === 'Percent' && Number(g.cap) > 0 ? Math.min(raw, Number(g.cap)) : raw);
   // BR26: a promotion is exactly one of Amount / Percent. BR8: one per booking.
-  // BR22: valid only between its dates. BR21: the discount is frozen on the booking.
+  // BR27: valid only between its dates. BR21: the discount is frozen on the booking.
   return html`
 <div class="pane" data-key="offer" style="display:flex;flex-direction:column;gap:var(--space-6)">
   ${h1('Create a promotion', 'A promotion works on any event while its dates are valid. Customers enter its code when they reserve.')}

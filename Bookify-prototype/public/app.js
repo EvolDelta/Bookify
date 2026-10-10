@@ -517,6 +517,14 @@ async function createEvent() {
   } catch (err) { fail(err); }
 }
 
+// Leave the create form without saving. Asks first if anything was typed.
+function cancelCreate() {
+  const edited = JSON.stringify(state.n) !== JSON.stringify(blankEvent());
+  if (edited && !confirm('Discard this event? Nothing has been saved yet.')) return;
+  setState({ n: blankEvent(), nTouched: false });
+  go('organizer', 'dash');
+}
+
 async function setEventStatus(id, status) {
   try {
     await api('PATCH', `/events/${id}/status`, { event_status: status });
@@ -1280,7 +1288,7 @@ function createView() {
         })}
         ${fieldError(e.types)}
       </div>
-      <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;padding-top:var(--space-2)"><button data-click="${createEvent}" ${!org || org.verification_status !== 'Verified' ? html`disabled` : ''} class="btn btn-primary">Create draft</button><button data-click="${() => setState({ n: blankEvent(), nTouched: false })}" class="btn btn-ghost">Reset form</button></div>
+      <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;padding-top:var(--space-2)"><button data-click="${createEvent}" ${!org || org.verification_status !== 'Verified' ? html`disabled` : ''} class="btn btn-primary">Create draft</button><button data-click="${() => setState({ n: blankEvent(), nTouched: false })}" class="btn btn-ghost">Reset form</button><button data-click="${cancelCreate}" class="btn btn-secondary" style="margin-left:auto">Cancel</button></div>
     </div>
     <div style="width:320px;flex:none;display:flex;flex-direction:column;gap:var(--space-4)">
       <h6 style="margin:0;color:var(--color-neutral-500)">Preview — browse card</h6>
